@@ -16,7 +16,7 @@ import argparse
 import logging
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +28,12 @@ import certifi
 try:
     import yfinance as yf
 except ImportError as exc:
-    raise RuntimeError("Missing dependency: yfinance. Install with `pip install yfinance`.") from exc
+    # ... handle missing dependency ...
+    raise RuntimeError("Missing dependency: yfinance") from exc
 
 logger = logging.getLogger("atw_macro_collector")
+
+# ... rest of constants ...
 
 _ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = _ROOT / "data"
@@ -186,10 +189,33 @@ def fetch_imf_datamapper_series(indicator: str, country_iso3: str = "MAR") -> pd
     return _to_datetime_index(pd.Series(values))
 
 
-def fetch_yf_close(ticker: str, period: str = "10y", interval: str = "1d") -> pd.Series:
+def get_last_date(path: Path) -> pd.Timestamp | None:
+    """Safely extracts the last valid date from the output CSV."""
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        # Read only the last few rows to find a date
+        df = pd.read_csv(path, usecols=["date"]).tail(5)
+        if df.empty:
+            return None
+        return pd.to_datetime(df["date"]).max()
+    except Exception:
+        return None
+
+
+def fetch_yf_close(
+    ticker: str,
+    period: str | None = "10y",
+    start: str | None = None,
+    end: str | None = None,
+    interval: str = "1d",
+) -> pd.Series:
+    """Fetches Close prices from yfinance using either period or start/end window."""
     df = yf.download(
         tickers=ticker,
-        period=period,
+        period=None if start else period,
+        start=start,
+        end=end,
         interval=interval,
         auto_adjust=False,
         progress=False,
@@ -221,8 +247,9 @@ def fetch_first_available_yf(candidates: list[str]) -> tuple[pd.Series, str | No
     return pd.Series(dtype=float), None
 
 
-def collect_series() -> dict[str, pd.Series]:
+def collect_series(start_date: str | None = None) -> dict[str, pd.Series]:
     series_map: dict[str, pd.Series] = {}
+    yf_period = "10y" if not start_date else None
 
     # World Bank (Morocco)
     for output_col, indicator in WORLD_BANK_MA.items():
@@ -252,12 +279,18 @@ def collect_series() -> dict[str, pd.Series]:
 
     # yfinance
     for output_col, candidates in YF_CANDIDATES.items():
-        series, used = fetch_first_available_yf(candidates)
-        if used:
-            logger.info("yfinance %s -> %s (%d pts)", used, output_col, len(series))
+        for ticker in candidates:
+            try:
+                series = fetch_yf_close(ticker, period=yf_period, start=start_date)
+                if not series.empty:
+                    logger.info("yfinance %s -> %s (%d pts)", ticker, output_col, len(series))
+                    series_map[output_col] = series
+                    break
+            except Exception as exc:
+                logger.warning("yfinance %s failed: %s", ticker, exc)
         else:
-            logger.warning("yfinance failed for %s (candidates: %s)", output_col, ",".join(candidates))
-        series_map[output_col] = series
+            logger.warning("yfinance failed all candidates for %s", output_col)
+            series_map[output_col] = pd.Series(dtype=float)
 
     return series_map
 
@@ -349,6 +382,18 @@ def build_daily_frame(
 
     out = df.reset_index().rename(columns={"index": "date"})
     out["date"] = out["date"].dt.date.astype(str)
+
+    # --- Data Cleaning (per USER request): Remove rows with missing core daily data ---
+    # We drop rows where crucial Yahoo Finance columns are NaN to remove sparse historical rows.
+    # This ensures the dataset effectively starts from ~2016-04-20 when daily tracking begins.
+    clean_subset = ["eur_mad", "usd_mad", "masi_close", "vix"]
+    existing_subset = [c for c in clean_subset if c in out.columns]
+    if existing_subset:
+        initial_len = len(out)
+        out = out.dropna(subset=existing_subset, how="all")
+        if len(out) < initial_len:
+            logger.info("Removed %d sparse historical rows (missing core daily indicators).", initial_len - len(out))
+
     out = out[OUTPUT_COLUMNS]
     out, dropped = _prune_sparse_columns(
         out,
@@ -365,13 +410,25 @@ def write_output(df: pd.DataFrame, out_path: Path, full_refresh: bool) -> pd.Dat
     target_columns = list(df.columns)
 
     if out_path.exists() and not full_refresh:
-        existing = pd.read_csv(out_path)
-        combined = pd.concat([existing, df], ignore_index=True, sort=False)
-        combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
-        combined = combined.dropna(subset=["date"])
-        combined = combined.sort_values("date")
-        combined = combined.drop_duplicates(subset=["date"], keep="last")
-        combined["date"] = combined["date"].dt.date.astype(str)
+        try:
+            existing = pd.read_csv(out_path)
+            if existing.empty:
+                combined = df.copy()
+            else:
+                combined = pd.concat([existing, df], ignore_index=True, sort=False)
+        except pd.errors.EmptyDataError:
+            logger.warning("Existing file was empty. Starting fresh.")
+            combined = df.copy()
+        except Exception as exc:
+            logger.warning("Could not read existing file: %s. Starting fresh.", exc)
+            combined = df.copy()
+        
+        if "date" in combined.columns:
+            combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
+            combined = combined.dropna(subset=["date"])
+            combined = combined.sort_values("date")
+            combined = combined.drop_duplicates(subset=["date"], keep="last")
+            combined["date"] = combined["date"].dt.date.astype(str)
         for col in target_columns:
             if col not in combined.columns:
                 combined[col] = np.nan
@@ -415,13 +472,29 @@ def main() -> int:
     if not 0.0 <= args.max_missing_ratio <= 1.0:
         raise ValueError("--max-missing-ratio must be between 0.0 and 1.0")
 
+    # Determine window for collection
+    start_date = args.start_date
+    is_incremental = False
+
+    if not args.full_refresh:
+        last_date = get_last_date(args.out)
+        if last_date:
+            # Lookback 30 days to ensure windowed indicators (fx_pressure, momentum) are correct
+            lookback = last_date - timedelta(days=30)
+            start_date = lookback.strftime("%Y-%m-%d")
+            is_incremental = True
+            logger.info("Incremental update: resuming from %s (lookback to %s)", last_date.date(), start_date)
+    
+    if not is_incremental:
+        logger.info("Full refresh/Initial run: scraping from %s", start_date)
+
     logger.info("Collecting ATW macro series...")
-    series_map = collect_series()
+    series_map = collect_series(start_date=start_date if is_incremental else None)
 
     logger.info("Building daily merged dataset...")
     daily_df = build_daily_frame(
         series_map,
-        start_date=args.start_date,
+        start_date=start_date,
         end_date=args.end_date,
         max_missing_ratio=args.max_missing_ratio,
     )
