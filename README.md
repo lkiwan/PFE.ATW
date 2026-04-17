@@ -23,5 +23,23 @@ This project is a comprehensive data collection and processing pipeline for fina
    python scrapers/atw_macro_collector.py
    ```
 
+## Run valuation models from `data/`
+Fundamental valuation models are now merged in:
+- `models/fundamental_models.py`
+- The file is standalone (no dependency on `utils/financial_constants.py`)
+
+They read inputs from the `data` folder:
+- Market price and market cap: `data/ATW_bourse_casa_full.csv` (latest row)
+- Merged periodic fundamentals (if available): `data/historical/ATW_merged.json` and `data/ATW_fondamental.csv`
+- Canonical normalized inputs: `data/ATW_model_inputs.json`
+
+Example:
+```bash
+python -m models.fundamental_models --model graham
+python -m models.fundamental_models --model all
+```
+
+The loader merges available ATW files automatically before running calculations.
+
 ---
 *Created as part of PFE (Projet de Fin d'Études).*
