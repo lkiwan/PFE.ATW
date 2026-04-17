@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'C:\\\\Users\\\\arhou\\\\OneDrive\\\\Bureau\\\\PFE.01\\\\scrapers\\\\fondamental_scraper.py', encoding='utf-8'\\).read\\(\\)\\); print\\('scraper OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'C:\\\\Users\\\\arhou\\\\OneDrive\\\\Bureau\\\\PFE.01\\\\models\\\\fundamental_models.py', encoding='utf-8'\\).read\\(\\)\\); print\\('models OK'\\)\")",
+      "Bash(python -m models.fundamental_models --model all)",
+      "Bash(python *)",
+      "Bash(/c/Users/arhou/AppData/Local/Programs/Python/Python313/python.exe models/fundamental_models.py --model all)",
+      "Bash(/c/Users/arhou/AppData/Local/Programs/Python/Python313/python.exe *)"
+    ]
+  }
+}

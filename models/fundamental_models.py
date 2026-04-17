@@ -209,6 +209,7 @@ def _map_scraper_payload_to_model_inputs(raw: Mapping[str, Any], *, csv_row: boo
             "revenues": hist("hist_revenue"),
             "net_income": hist("hist_net_income"),
             "eps": hist("hist_eps"),
+            "ebit": hist("hist_ebit"),
             "ebitda": hist("hist_ebitda"),
             "free_cash_flow": hist("hist_fcf"),
             "operating_cash_flow": hist("hist_ocf"),
@@ -230,6 +231,12 @@ def _map_scraper_payload_to_model_inputs(raw: Mapping[str, Any], *, csv_row: boo
             "price_to_book": _to_float(raw.get("price_to_book")),
             "dividend_yield": _to_float(raw.get("dividend_yield")),
             "ev_ebitda_hist": hist("hist_ev_ebitda"),
+            "pe_ratio_hist": hist("pe_ratio_hist"),
+            "pbr_hist": hist("pbr_hist"),
+            "ev_revenue_hist": hist("ev_revenue_hist"),
+            "ev_ebit_hist": hist("ev_ebit_hist"),
+            "capitalization_hist": hist("capitalization_hist"),
+            "fcf_yield_hist": hist("fcf_yield_hist"),
             "dividend_per_share_hist": hist("hist_dividend_per_share"),
             "eps_growth_hist": hist("hist_eps_growth"),
         },
@@ -238,17 +245,22 @@ def _map_scraper_payload_to_model_inputs(raw: Mapping[str, Any], *, csv_row: boo
 
 
 def _load_scraper_merged_inputs(data_dir: Path, ticker: str) -> Dict[str, Any]:
-    merged: Dict[str, Any] = {}
+    fundamentals_json_path = data_dir / f"{ticker}_fondamental.json"
+    if fundamentals_json_path.exists():
+        raw_json = _load_json_object(fundamentals_json_path)
+        return _map_scraper_payload_to_model_inputs(raw_json, csv_row=False)
 
     merged_json_path = data_dir / "historical" / f"{ticker}_merged.json"
     if merged_json_path.exists():
         raw_json = _load_json_object(merged_json_path)
+        return _map_scraper_payload_to_model_inputs(raw_json, csv_row=False)
+
+    # Legacy fallback path (for pre-simplification datasets).
+    merged: Dict[str, Any] = {}
+    raw_json_path = data_dir / "historical" / f"{ticker}_marketscreener_v3.json"
+    if raw_json_path.exists():
+        raw_json = _load_json_object(raw_json_path)
         _deep_merge(merged, _map_scraper_payload_to_model_inputs(raw_json, csv_row=False))
-    else:
-        raw_json_path = data_dir / "historical" / f"{ticker}_marketscreener_v3.json"
-        if raw_json_path.exists():
-            raw_json = _load_json_object(raw_json_path)
-            _deep_merge(merged, _map_scraper_payload_to_model_inputs(raw_json, csv_row=False))
 
     fond_csv_path = data_dir / f"{ticker}_fondamental.csv"
     if fond_csv_path.exists():
@@ -265,6 +277,8 @@ def load_stock_data(data_dir: Optional[str] = None, ticker: str = "ATW") -> Dict
     base_data_dir = Path(data_dir) if data_dir else (project_root / "data")
     csv_path = base_data_dir / f"{ticker}_bourse_casa_full.csv"
     inputs_path = base_data_dir / f"{ticker}_model_inputs.json"
+    fundamentals_json_path = base_data_dir / f"{ticker}_fondamental.json"
+    merged_json_path = base_data_dir / "historical" / f"{ticker}_merged.json"
 
     market_row = _load_latest_market_row(csv_path)
     current_price = _to_float(market_row.get("Dernier Cours"))
@@ -272,8 +286,9 @@ def load_stock_data(data_dir: Optional[str] = None, ticker: str = "ATW") -> Dict
         raise ValueError(f"Could not parse 'Dernier Cours' from {csv_path}")
 
     market_cap_mad = _to_float(market_row.get("Capitalisation"))
-    model_inputs = _load_model_inputs(inputs_path)
     scraper_merged_inputs = _load_scraper_merged_inputs(base_data_dir, ticker)
+    has_primary_fundamental_source = fundamentals_json_path.exists() or merged_json_path.exists()
+    model_inputs = {} if has_primary_fundamental_source else _load_model_inputs(inputs_path)
 
     stock_data: Dict[str, Any] = {
         "identity": {
@@ -289,7 +304,8 @@ def load_stock_data(data_dir: Optional[str] = None, ticker: str = "ATW") -> Dict
         "consensus": {},
     }
 
-    # Merge periodic scraper outputs first, then canonical model_inputs.
+    # Primary mode: merged periodic JSON + Bourse Casa market row.
+    # Legacy mode: older files are merged only if the primary merged JSON is missing.
     _deep_merge(stock_data, scraper_merged_inputs)
     _deep_merge(stock_data, model_inputs)
 
@@ -391,15 +407,24 @@ class DCFModel(BaseValuationModel):
         if values:
             return values
 
+        # Use EBITDA when available, otherwise EBIT — banks report EBIT only.
         ebitda = self._get_hist_values("financials", "ebitda")
+        ebit = self._get_hist_values("financials", "ebit")
+        earnings_series = ebitda or ebit
         capex = self._get_hist_values("financials", "capex")
         for year in ["2025", "2024", "2023"]:
-            eb = ebitda.get(year)
+            eb = earnings_series.get(year)
             cx = capex.get(year)
             if eb and cx:
                 fcf_approx = eb * (1 - CORPORATE_TAX_RATE) - abs(cx)
                 if fcf_approx > 0:
                     return [fcf_approx]
+
+        # Last-resort fallback: most recent historical FCF if we have any.
+        for year in sorted(fcf.keys(), reverse=True):
+            val = fcf[year]
+            if val is not None and val > 0:
+                return [val]
         return []
 
     def _extend_projections(self, fcf: List[float], years_total: int = 5) -> List[float]:
@@ -726,34 +751,50 @@ class RelativeValuationModel(BaseValuationModel):
         }
 
     def _ev_ebitda_fair_value(self) -> Optional[Dict[str, Any]]:
-        ev_ebitda_hist = self._get_hist_values(
-            "valuation",
-            "ev_ebitda_hist",
-            years=["2021", "2022", "2023", "2024", "2025"],
-        )
-        if not ev_ebitda_hist:
+        years = ["2021", "2022", "2023", "2024", "2025"]
+        ev_ebitda_hist = self._get_hist_values("valuation", "ev_ebitda_hist", years=years)
+        ebitda = self._get_financial("ebitda", "2025")
+
+        # Primary path: EV/EBITDA × latest EBITDA.
+        if ev_ebitda_hist and ebitda and ebitda > 0:
+            hist_median = statistics.median(ev_ebitda_hist.values())
+            sector_ev = SECTOR_BENCHMARKS["ev_ebitda"]
+            blended = hist_median * 0.6 + sector_ev * 0.4
+            net_debt = self._get_financial("net_debt", "2025") or 0
+            cash = self._get_financial("cash_and_equivalents", "2025") or 0
+            implied_ev = blended * ebitda
+            equity_value = implied_ev - net_debt + cash
+            per_share = (equity_value * 1_000_000) / NUM_SHARES
+            return {
+                "value": round(per_share, 2),
+                "historical_median": round(hist_median, 2),
+                "sector_benchmark": sector_ev,
+                "blended_multiple": round(blended, 2),
+                "ebitda_used": round(ebitda, 0),
+                "multiple_used": "EV/EBITDA",
+            }
+
+        # Bank fallback: EV/EBIT × latest EBIT.
+        ev_ebit_hist = self._get_hist_values("valuation", "ev_ebit_hist", years=years)
+        ebit = self._get_financial("ebit", "2025")
+        if not ev_ebit_hist or not ebit or ebit <= 0:
             return None
 
-        hist_median = statistics.median(ev_ebitda_hist.values())
+        hist_median = statistics.median(ev_ebit_hist.values())
         sector_ev = SECTOR_BENCHMARKS["ev_ebitda"]
         blended = hist_median * 0.6 + sector_ev * 0.4
-
-        ebitda = self._get_financial("ebitda", "2025")
         net_debt = self._get_financial("net_debt", "2025") or 0
         cash = self._get_financial("cash_and_equivalents", "2025") or 0
-        if not ebitda or ebitda <= 0:
-            return None
-
-        implied_ev = blended * ebitda
+        implied_ev = blended * ebit
         equity_value = implied_ev - net_debt + cash
         per_share = (equity_value * 1_000_000) / NUM_SHARES
-
         return {
             "value": round(per_share, 2),
             "historical_median": round(hist_median, 2),
             "sector_benchmark": sector_ev,
             "blended_multiple": round(blended, 2),
-            "ebitda_used": round(ebitda, 0),
+            "ebit_used": round(ebit, 0),
+            "multiple_used": "EV/EBIT",
         }
 
     def _pb_fair_value(self) -> Optional[Dict[str, Any]]:
@@ -967,16 +1008,23 @@ class MonteCarloModel(BaseValuationModel):
 
     def _get_base_revenue(self) -> float:
         sales = self._get_hist_values("financials", "net_sales")
-        for year in ["2025", "2024", "2023"]:
+        if not sales:
+            return 0
+        for year in ["2025", "2024", "2023", "2022", "2021"]:
             if year in sales and sales[year]:
                 return sales[year]
-        return 0
+        # Last resort: take the most recent year available.
+        latest = max(sales.keys())
+        return sales.get(latest) or 0
 
     def _get_base_margin(self) -> float:
-        margins = self._get_hist_values("financials", "ebitda_margin")
-        for year in ["2025", "2024", "2023"]:
-            if year in margins and margins[year]:
-                return margins[year]
+        # EBITDA margin first; fall back to EBIT margin for banks where EBITDA
+        # isn't reported.
+        for margin_field in ("ebitda_margin", "ebit_margin"):
+            margins = self._get_hist_values("financials", margin_field)
+            for year in ["2025", "2024", "2023"]:
+                if year in margins and margins[year]:
+                    return margins[year]
         return 45.0
 
     def _get_capex_ratio(self) -> float:
@@ -1047,16 +1095,26 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    stock_data = load_stock_data(data_dir=args.data_dir, ticker=args.ticker)
-    if args.model == "all":
-        for key in ["dcf", "ddm", "graham", "relative", "monte_carlo"]:
-            result = run_model(key, stock_data)
-            print(f"\n=== {result.model_name} ===")
-            print(json.dumps(asdict(result), indent=2, ensure_ascii=False))
-        return
+    output_dir = Path(args.data_dir) if args.data_dir else Path(__file__).resolve().parent.parent / "data"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "models_result.json"
 
-    result = run_model(args.model, stock_data)
-    print(json.dumps(asdict(result), indent=2, ensure_ascii=False))
+    stock_data = load_stock_data(data_dir=args.data_dir, ticker=args.ticker)
+    model_keys = ["dcf", "ddm", "graham", "relative", "monte_carlo"]
+    all_results: Dict[str, Any] = {}
+    for key in model_keys:
+        all_results[key] = asdict(run_model(key, stock_data))
+
+    if args.model == "all":
+        for key in model_keys:
+            payload = all_results[key]
+            print(f"\n=== {payload['model_name']} ===")
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(all_results[args.model], indent=2, ensure_ascii=False))
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":

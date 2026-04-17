@@ -8,7 +8,7 @@ Installation:
     pip install undetected-chromedriver selenium webdriver-manager
 
 Usage:
-    python scrapers/marketscreener_scraper_v3.py
+    python scrapers/fondamental_scraper.py
 """
 
 import csv
@@ -51,13 +51,13 @@ except ImportError as e:
 # Configuration
 # =============================================================================
 _ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = _ROOT / "data" / "historical"
+DATA_DIR = _ROOT / "data" 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ATW_OUTPUT_CSV = _ROOT / "data" / "ATW_fondamental.csv"
+ATW_FUNDAMENTAL_JSON = _ROOT / "data" / "ATW_fondamental.json"
 ATW_SYMBOL = "ATW"
 ATW_NAME = "ATTIJARIWAFA BANK"
 ATW_URL_CODE = "ATTIJARIWAFA-BANK-SA-41148801"
-ATW_CACHE_JSON = DATA_DIR / f"{ATW_SYMBOL}_marketscreener_v3.json"
 ATW_MERGED_JSON = DATA_DIR / f"{ATW_SYMBOL}_merged.json"
 ATW_MODEL_INPUTS_JSON = _ROOT / "data" / f"{ATW_SYMBOL}_model_inputs.json"
 FAST_PAGE_LOAD_TIMEOUT = 30
@@ -126,6 +126,21 @@ class StockData:
 
     # Valuation multiple history
     hist_ev_ebitda: Dict[str, float] = field(default_factory=dict)
+
+    # Historical valuation multiples (from /valuation/ page "Company Valuation" table).
+    # Needed for banks where EBITDA-based multiples are unavailable and the relative
+    # model has to fall back to P/E, P/BV, EV/Revenue, and EV/EBIT.
+    pe_ratio_hist: Dict[str, float] = field(default_factory=dict)
+    pbr_hist: Dict[str, float] = field(default_factory=dict)
+    ev_revenue_hist: Dict[str, float] = field(default_factory=dict)
+    ev_ebit_hist: Dict[str, float] = field(default_factory=dict)
+
+    # Historical absolute metrics (Million MAD) from the valuation page.
+    capitalization_hist: Dict[str, float] = field(default_factory=dict)
+    hist_ebit: Dict[str, float] = field(default_factory=dict)
+
+    # Computed from hist_fcf / capitalization_hist, filled in post-scrape.
+    fcf_yield_hist: Dict[str, float] = field(default_factory=dict)
 
     # Dividend per share (8-year history, MAD)
     hist_dividend_per_share: Dict[str, float] = field(default_factory=dict)
@@ -758,12 +773,12 @@ class SeleniumScraper:
             # Named growth / change rows
             (r'(?:eps|earnings|bpa)\s*(?:growth|change|chg|var|croissance|variation)', data.hist_eps_growth, False),
             (r'(?:revenue|sales)\s*growth', _skip, False),
-            # Per-share rows (DPS and EPS matched first, then skip other per-share)
-            (r'(?:dividend\s*per\s*share|dividende\s*par\s*action|^dps$)', data.hist_dividend_per_share, True),
+            # Per-share rows (EPS only here; DPS is sourced from valuation page)
             (r'earnings\s*per\s*share', data.hist_eps, True),
             (r'per\s*share', _skip, False),
             # Absolute metrics (income statement + cash flow)
-            (r'(?:revenue|(?:net\s*)?sales|turnover)(?!.*growth)', data.hist_revenue, True),
+            # Revenue is intentionally NOT read from /finances/ and is sourced
+            # from /finances-income-statement/ in _override_income_statement_metrics().
             (r'(?:net\s*income|net\s*profit)(?!.*(?:margin|growth))', data.hist_net_income, True),
             (r'(?:^eps|earnings\s*per\s*share)', data.hist_eps, True),
             (r'ebitda(?!.*margin)', data.hist_ebitda, True),
@@ -774,18 +789,138 @@ class SeleniumScraper:
             (r'(?:net\s*debt|financial\s*debt|^debt$)', data.hist_debt, True),
             (r'cash(?!.*flow)(?!.*capex)', data.hist_cash, True),
             (r'(?:shareholders?\s*equity|stockholders?\s*equity|shareholders?\s*funds|^(?:equity|total\s*equity)$)(?!.*return)', data.hist_equity, True),
-            # Margins
-            (r'(?:net|profit)\s*margin', data.hist_net_margin, True),
-            (r'(?:ebit|operating)\s*margin', data.hist_ebit_margin, True),
-            (r'ebitda\s*margin', data.hist_ebitda_margin, True),
-            # Returns
-            (r'(?:return\s*on\s*equity|^roe$)', data.hist_roe, True),
-            (r'(?:return\s*on\s*(?:total\s*)?capital|roce|return\s*on\s*capital\s*employed)', data.hist_roce, True),
+            # Margins/returns are intentionally NOT read from this page
+            # to avoid mixed-denominator variants. We source them only from
+            # finances-ratios page in scrape_ratios_page().
         ]
 
         growth_map = {id(data.hist_eps): data.hist_eps_growth}
 
         self._parse_year_tables(soup, label_map, growth_map)
+        self._override_income_statement_metrics(data, url_code)
+
+    def _override_income_statement_metrics(self, data: StockData, url_code: str) -> None:
+        """
+        Source-of-truth overrides from the dedicated income statement page:
+        - Revenue: "Revenues Before Provision For Loan Losses" (US banks),
+          with fallbacks to "Total Revenues", "Net banking income" /
+          "Produit net bancaire" for European/Moroccan banks, then generic
+          "Revenues" / "Net sales".
+        - Net margin: Net Income / Total Revenues
+        - DPS: "Dividend Per Share"
+        """
+        url = f"{BASE_URL}/{url_code}/finances-income-statement/"
+        logger.info("📊 Loading income statement overrides...")
+        self.driver.get(url)
+        soup = self._wait_and_get_soup(wait_seconds=1.5 if self.fast_mode else 3.0)
+        self._maybe_dump_html(data.symbol, "income_statement")
+
+        income_revenue: Dict[str, float] = {}
+        total_revenues: Dict[str, float] = {}
+        nbi_revenue: Dict[str, float] = {}
+        generic_revenue: Dict[str, float] = {}
+        income_dps: Dict[str, float] = {}
+
+        # Shared exclusion suffix so none of the revenue patterns pick up
+        # derived sub-rows (per-share, growth, margin, yield, change, CAGR).
+        _rev_excl = (
+            r"(?!.*(?:per\s*share|growth|cagr|margin|yield|change|chg\.?|"
+            r"var\.?|variation|y\s*[/\-]\s*y|yoy))"
+        )
+
+        label_map: List[Tuple[str, Dict[str, float], bool]] = [
+            (
+                r"revenues?\s+before\s+provision(?:s)?\s+for\s+loan\s+loss(?:es)?"
+                + _rev_excl,
+                income_revenue,
+                True,
+            ),
+            (
+                r"(?:net\s*banking\s*income|produit\s*net\s*bancaire|^nbi$|^pnb$)"
+                + _rev_excl,
+                nbi_revenue,
+                True,
+            ),
+            (r"^total\s+revenues?\b" + _rev_excl, total_revenues, True),
+            (
+                r"(?:^revenues?$|^net\s*sales$|^sales$|^turnover$|^chiffre\s*d[''\u2019]affaires$)"
+                + _rev_excl,
+                generic_revenue,
+                True,
+            ),
+            (
+                r"(?:dividend\s*per\s*share|dividende\s*par\s*action|^dps$)"
+                r"(?!.*(?:growth|cagr|yield|payout))",
+                income_dps,
+                True,
+            ),
+        ]
+        self._parse_year_tables(soup, label_map)
+
+        # Income statement tables sometimes use B/M suffixes; convert to millions.
+        self._normalize_to_millions(income_revenue)
+        self._normalize_to_millions(total_revenues)
+        self._normalize_to_millions(nbi_revenue)
+        self._normalize_to_millions(generic_revenue)
+
+        # Fall through candidates in order of bank-accuracy preference.
+        revenue_source = (
+            income_revenue
+            or nbi_revenue
+            or total_revenues
+            or generic_revenue
+        )
+        if revenue_source:
+            data.hist_revenue.clear()
+            data.hist_revenue.update(revenue_source)
+
+        # Net margin = Net Income / Total Revenues (fall back to whichever
+        # revenue series actually came through).
+        margin_denominator = total_revenues or revenue_source
+        computed_margin: Dict[str, float] = {}
+        for year, total_rev in margin_denominator.items():
+            ni = data.hist_net_income.get(year)
+            if ni is None or total_rev is None or abs(total_rev) <= 1e-9:
+                continue
+            margin = (ni / total_rev) * 100
+            if -1000 < margin < 1000:
+                computed_margin[year] = round(margin, 2)
+        if computed_margin:
+            data.hist_net_margin.clear()
+            data.hist_net_margin.update(computed_margin)
+
+        if income_dps:
+            data.hist_dividend_per_share.clear()
+            data.hist_dividend_per_share.update(income_dps)
+
+    def scrape_balance_sheet_page(self, data: StockData, url_code: str) -> None:
+        """
+        Scrape balance-sheet equity history to fill missing prior year(s),
+        especially equity_{t-1} needed for ROE (e.g. 2019 for 2020 ROE).
+        """
+        url = f"{BASE_URL}/{url_code}/finances-balance-sheet/"
+        logger.info("📊 Loading balance sheet...")
+        self.driver.get(url)
+        soup = self._wait_and_get_soup(wait_seconds=1.5 if self.fast_mode else 3.0)
+        self._maybe_dump_html(data.symbol, "balance_sheet")
+
+        tmp_equity: Dict[str, float] = {}
+        label_map: List[Tuple[str, Dict[str, float], bool]] = [
+            (
+                r'(?:total\s*(?:common\s*)?equity|shareholders?\s*equity|'
+                r'stockholders?\s*equity|shareholders?\s*funds|'
+                r'^(?:equity|total\s*equity)$)(?!.*(?:growth|cagr|debt|return|ratio))',
+                tmp_equity,
+                True,
+            ),
+        ]
+        self._parse_year_tables(soup, label_map)
+        self._normalize_to_millions(tmp_equity)
+
+        # Fill only missing years; keep existing validated values untouched.
+        for year, value in tmp_equity.items():
+            if year not in data.hist_equity:
+                data.hist_equity[year] = value
 
     def scrape_ratios_page(self, data: StockData, url_code: str) -> None:
         """Scrape financial ratios page (margins, ROE, ROCE)."""
@@ -796,10 +931,16 @@ class SeleniumScraper:
         soup = self._wait_and_get_soup(wait_seconds=1.5 if self.fast_mode else 3.0)
         self._maybe_dump_html(data.symbol, "ratios")
 
+        # Ratios page is the source of truth for gross/EBIT/EBITDA margins and ROE/ROCE.
+        data.hist_gross_margin.clear()
+        data.hist_ebit_margin.clear()
+        data.hist_ebitda_margin.clear()
+        data.hist_roe.clear()
+        data.hist_roce.clear()
+
         label_map: List[Tuple[str, Dict[str, float], bool]] = [
             # Margins (exclude growth/CAGR rows like "Gross Profit, 1 Yr. Growth %")
             (r'gross\s*(?:profit\s*)?margin\s*%?(?!.*(?:growth|cagr))', data.hist_gross_margin, True),
-            (r'net\s*(?:income\s*)?margin\s*%?(?!.*(?:growth|cagr))', data.hist_net_margin, True),
             (r'ebit[^d]?\s*margin\s*%?(?!.*(?:growth|cagr))', data.hist_ebit_margin, True),
             (r'ebitda\s*margin\s*%?(?!.*(?:growth|cagr))', data.hist_ebitda_margin, True),
             # Returns (exclude growth/CAGR rows)
@@ -918,11 +1059,11 @@ class SeleniumScraper:
                         data.price_to_book = pb
                         logger.info(f"✓ P/B (valuation table, {latest}): {pb}")
 
-        # Fill DPS from this page if finances page missed it
+        # DPS fallback: only if income-statement override didn't populate it.
         if not data.hist_dividend_per_share:
             temp_dps: Dict[str, float] = {}
             label_map_dps: List[Tuple[str, Dict[str, float], bool]] = [
-                (r'dividend\s*per\s*share', temp_dps, True),
+                (r'(?:dividend\s*per\s*share|dividende\s*par\s*action|^dps$)(?!.*(?:growth|cagr|yield|payout))', temp_dps, True),
             ]
             self._parse_year_tables(soup, label_map_dps)
             if temp_dps:
@@ -934,6 +1075,44 @@ class SeleniumScraper:
                 (r'(?:ev\s*/\s*ebitda|enterprise\s*value\s*/\s*ebitda)', data.hist_ev_ebitda, True),
             ]
             self._parse_year_tables(soup, label_map_ev)
+
+        # Parse the "Company Valuation" table for bank-friendly multiples and
+        # absolute metrics that DCF / Monte Carlo / Relative Valuation need.
+        # Order matters — specific labels first, anchored so "EBIT" doesn't
+        # swallow "EV / EBIT" and "Capitalization" doesn't swallow
+        # "Capitalization / Revenue".
+        # Labels may carry unit suffixes or footnote markers
+        # (e.g. "Capitalization (M MAD)", "EBIT¹"), so these use word-boundary
+        # matching instead of $-anchors. Specific multi-token patterns still
+        # come first so "Capitalization / Revenue" and "EV / EBIT" don't bleed
+        # into the bare "Capitalization" and "EBIT" patterns below.
+        label_map_company_valuation: List[Tuple[str, Dict[str, float], bool]] = [
+            (r'^\s*ev\s*/\s*ebit(?!d)', data.ev_ebit_hist, True),
+            (r'^\s*capitali[sz]ation\s*/\s*revenue', data.ev_revenue_hist, True),
+            (r'^\s*p\s*/\s*e(?!v)', data.pe_ratio_hist, True),
+            (r'^\s*pbr(?!\w)', data.pbr_hist, True),
+            (r'^\s*capitali[sz]ation(?!\s*/)', data.capitalization_hist, True),
+            (r'^\s*ebit(?!da)(?!.*margin)', data.hist_ebit, True),
+        ]
+        self._parse_year_tables(soup, label_map_company_valuation)
+
+        # Drop spurious zero values — MarketScreener renders "0x" for multiples
+        # that don't apply to banks (EV/EBIT, etc.). Treat them as null.
+        for multiples_dict in (
+            data.pe_ratio_hist,
+            data.pbr_hist,
+            data.ev_revenue_hist,
+            data.ev_ebit_hist,
+        ):
+            for year in list(multiples_dict.keys()):
+                if multiples_dict[year] == 0:
+                    multiples_dict.pop(year, None)
+
+        # Capitalization and EBIT may come through with B/M suffixes expanded
+        # to raw MAD; collapse to millions so they match the rest of the
+        # hist_* series and the model layer.
+        self._normalize_to_millions(data.capitalization_hist)
+        self._normalize_to_millions(data.hist_ebit)
 
     # ------------------------------------------------------------------
     # Rate-limit / bot-challenge detection
@@ -1002,6 +1181,7 @@ class SeleniumScraper:
             data.hist_net_income,
             data.hist_eps,
             data.hist_ebitda,
+            data.hist_ebit,
             data.hist_fcf,
             data.hist_ocf,
             data.hist_capex,
@@ -1015,6 +1195,12 @@ class SeleniumScraper:
             data.hist_roe,
             data.hist_roce,
             data.hist_ev_ebitda,
+            data.pe_ratio_hist,
+            data.pbr_hist,
+            data.ev_revenue_hist,
+            data.ev_ebit_hist,
+            data.capitalization_hist,
+            data.fcf_yield_hist,
             data.hist_dividend_per_share,
             data.hist_eps_growth,
         ]
@@ -1026,6 +1212,83 @@ class SeleniumScraper:
                     continue
                 if int(key_str) > cutoff_year:
                     series.pop(key, None)
+
+    @staticmethod
+    def _compute_derived_series(data: StockData) -> None:
+        """
+        Fill in the derived series that the valuation models expect:
+          hist_fcf       = hist_ocf - |hist_capex|   (per-year, when both known)
+          fcf_yield_hist = hist_fcf / capitalization_hist
+          hist_revenue   = capitalization_hist / ev_revenue_hist (fallback)
+
+        hist_fcf is filled only for years the scraper did not already capture
+        a direct FCF value — preserving scraped values where they exist.
+        """
+        for year, ocf in data.hist_ocf.items():
+            if year in data.hist_fcf:
+                continue
+            capex = data.hist_capex.get(year)
+            if capex is None:
+                continue
+            data.hist_fcf[year] = round(ocf - abs(capex), 2)
+
+        for year, fcf in data.hist_fcf.items():
+            cap = data.capitalization_hist.get(year)
+            if not cap or cap <= 0 or fcf is None:
+                continue
+            data.fcf_yield_hist[year] = round(fcf / cap, 4)
+
+        # Sanity check: hist_revenue for a bank of ATW's scale should be in
+        # the thousands of Million MAD. If the max scraped value is below 100
+        # it's almost certainly a per-share or percentage sub-row that slipped
+        # past the label filter — discard it and derive from cap / EV-Revenue.
+        if data.hist_revenue:
+            max_rev = max(abs(v) for v in data.hist_revenue.values() if v is not None)
+            if max_rev < 100:
+                data.hist_revenue.clear()
+
+        if not data.hist_revenue and data.capitalization_hist and data.ev_revenue_hist:
+            for year, cap in data.capitalization_hist.items():
+                mult = data.ev_revenue_hist.get(year)
+                if not mult or mult <= 0 or not cap or cap <= 0:
+                    continue
+                data.hist_revenue[year] = round(cap / mult, 2)
+
+    @staticmethod
+    def _recompute_roe_average_equity(data: StockData) -> None:
+        """ROE = Net Income / average equity ((E_t + E_t-1)/2)."""
+        if not data.hist_net_income or not data.hist_equity:
+            return
+
+        existing_roe = dict(data.hist_roe)
+        recomputed: Dict[str, float] = {}
+        for year, ni in data.hist_net_income.items():
+            if ni is None:
+                continue
+            try:
+                y = int(str(year))
+            except ValueError:
+                continue
+
+            eq_t = data.hist_equity.get(str(y))
+            eq_prev = data.hist_equity.get(str(y - 1))
+
+            # If prior-year equity is missing, preserve already scraped ROE.
+            if eq_t is None or eq_prev is None:
+                if year in existing_roe and existing_roe[year] is not None:
+                    recomputed[year] = existing_roe[year]
+                continue
+
+            avg_equity = (eq_t + eq_prev) / 2
+            if abs(avg_equity) <= 1e-9:
+                continue
+            roe = (ni / avg_equity) * 100
+            if -1000 < roe < 1000:
+                recomputed[year] = round(roe, 2)
+
+        if recomputed:
+            data.hist_roe.clear()
+            data.hist_roe.update(recomputed)
 
     def scrape(self, symbol: str, url_code: str) -> StockData:
         """Periodic fundamentals scrape (annual/semiannual/quarterly tables, no estimates)."""
@@ -1039,6 +1302,7 @@ class SeleniumScraper:
             ("finances",  self.scrape_finances_page),
             ("ratios",    self.scrape_ratios_page),
             ("cashflow",  self.scrape_cashflow_page),
+            ("balance_sheet", self.scrape_balance_sheet_page),
             ("valuation", self.scrape_valuation_page),
         ]
 
@@ -1057,6 +1321,8 @@ class SeleniumScraper:
             time.sleep(random.uniform(1.5, 3.0))
 
         self._keep_reported_years_only(data)
+        self._compute_derived_series(data)
+        self._recompute_roe_average_equity(data)
         data.validate()
 
         return data
@@ -1132,6 +1398,93 @@ def _print_summary(stock_data: StockData, output_file: Path) -> None:
     quality = (filled / total_fields) * 100 if total_fields else 0
     _safe_print(f"   Data Quality: {quality:.0f}% ({filled}/{total_fields})")
     _safe_print(f"   Saved to: {output_file.name}")
+
+
+def _save_atw_fondamental_json(stock_data: StockData, output_file: Path) -> None:
+    """Write ATW fundamentals-only JSON (no realtime merge)."""
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "symbol": stock_data.symbol,
+        "scrape_timestamp": stock_data.scrape_timestamp,
+        "pe_ratio": stock_data.pe_ratio,
+        "dividend_yield": stock_data.dividend_yield,
+        "price_to_book": stock_data.price_to_book,
+        "hist_revenue": stock_data.hist_revenue,
+        "hist_net_income": stock_data.hist_net_income,
+        "hist_eps": stock_data.hist_eps,
+        "hist_ebitda": stock_data.hist_ebitda,
+        "hist_fcf": stock_data.hist_fcf,
+        "hist_ocf": stock_data.hist_ocf,
+        "hist_capex": stock_data.hist_capex,
+        "hist_debt": stock_data.hist_debt,
+        "hist_cash": stock_data.hist_cash,
+        "hist_equity": stock_data.hist_equity,
+        "hist_net_margin": stock_data.hist_net_margin,
+        "hist_ebit_margin": stock_data.hist_ebit_margin,
+        "hist_ebitda_margin": stock_data.hist_ebitda_margin,
+        "hist_gross_margin": stock_data.hist_gross_margin,
+        "hist_roe": stock_data.hist_roe,
+        "hist_roce": stock_data.hist_roce,
+        "hist_ev_ebitda": stock_data.hist_ev_ebitda,
+        "pe_ratio_hist": stock_data.pe_ratio_hist,
+        "pbr_hist": stock_data.pbr_hist,
+        "ev_revenue_hist": stock_data.ev_revenue_hist,
+        "ev_ebit_hist": stock_data.ev_ebit_hist,
+        "capitalization_hist": stock_data.capitalization_hist,
+        "hist_ebit": stock_data.hist_ebit,
+        "fcf_yield_hist": stock_data.fcf_yield_hist,
+        "hist_dividend_per_share": stock_data.hist_dividend_per_share,
+        "hist_eps_growth": stock_data.hist_eps_growth,
+        "scrape_warnings": stock_data.scrape_warnings,
+        "data_source": {
+            "marketscreener_periodic": True,
+            "merged_with_realtime": False,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    payload = _prune_empty_values(payload)
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _is_empty_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (dict, list, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def _prune_empty_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            pruned = _prune_empty_values(item)
+            if not _is_empty_value(pruned):
+                cleaned[key] = pruned
+        return cleaned
+    if isinstance(value, list):
+        cleaned_list = [_prune_empty_values(item) for item in value]
+        return [item for item in cleaned_list if not _is_empty_value(item)]
+    return value
+
+
+def _already_scraped_this_month(output_file: Path) -> bool:
+    if not output_file.exists():
+        return False
+    try:
+        with open(output_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        ts_raw = payload.get("scrape_timestamp")
+        if not ts_raw:
+            return False
+        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        return ts.year == now.year and ts.month == now.month
+    except Exception:
+        return False
 
 
 def _save_atw_fondamental_csv(stock_data: StockData, output_file: Path) -> None:
@@ -1285,6 +1638,7 @@ def _to_model_inputs(stock_data: StockData) -> Dict[str, Any]:
             "revenues": dict(stock_data.hist_revenue),
             "net_income": dict(stock_data.hist_net_income),
             "eps": dict(stock_data.hist_eps),
+            "ebit": dict(stock_data.hist_ebit),
             "ebitda": dict(stock_data.hist_ebitda),
             "free_cash_flow": dict(stock_data.hist_fcf),
             "operating_cash_flow": dict(stock_data.hist_ocf),
@@ -1306,6 +1660,12 @@ def _to_model_inputs(stock_data: StockData) -> Dict[str, Any]:
             "price_to_book": stock_data.price_to_book,
             "dividend_yield": stock_data.dividend_yield,
             "ev_ebitda_hist": dict(stock_data.hist_ev_ebitda),
+            "pe_ratio_hist": dict(stock_data.pe_ratio_hist),
+            "pbr_hist": dict(stock_data.pbr_hist),
+            "ev_revenue_hist": dict(stock_data.ev_revenue_hist),
+            "ev_ebit_hist": dict(stock_data.ev_ebit_hist),
+            "capitalization_hist": dict(stock_data.capitalization_hist),
+            "fcf_yield_hist": dict(stock_data.fcf_yield_hist),
             "dividend_per_share_hist": dict(stock_data.hist_dividend_per_share),
             "eps_growth_hist": dict(stock_data.hist_eps_growth),
         },
@@ -1502,7 +1862,7 @@ def _normalize_model_inputs(payload: Dict[str, Any]) -> Dict[str, Any]:
         return payload
 
 
-def _save_merged_and_normalized(stock_data: StockData, market_overrides: Optional[Dict[str, Any]]) -> None:
+def _save_merged_json(stock_data: StockData, market_overrides: Optional[Dict[str, Any]]) -> None:
     merged_flat = asdict(stock_data)
     merged_flat["data_source"] = {
         "marketscreener_v3": True,
@@ -1513,6 +1873,8 @@ def _save_merged_and_normalized(stock_data: StockData, market_overrides: Optiona
     with open(ATW_MERGED_JSON, "w", encoding="utf-8") as f:
         json.dump(merged_flat, f, indent=2, ensure_ascii=False, default=str)
 
+
+def _save_model_inputs_json(stock_data: StockData) -> None:
     model_inputs = _to_model_inputs(stock_data)
     normalized_inputs = _normalize_model_inputs(model_inputs)
     with open(ATW_MODEL_INPUTS_JSON, "w", encoding="utf-8") as f:
@@ -1520,12 +1882,18 @@ def _save_merged_and_normalized(stock_data: StockData, market_overrides: Optiona
 
 
 def main():
-    parser = argparse.ArgumentParser(description='MarketScreener Scraper V3 (ATW periodic financials only)')
+    parser = argparse.ArgumentParser(description='ATW monthly fundamentals scraper (no realtime merge)')
     parser.add_argument('--headful', action='store_true', help='Show browser (not headless)')
     parser.add_argument('--debug', action='store_true', help='Dump rendered HTML and KV pairs to data/historical/_debug/')
     parser.add_argument('--slow', action='store_true',
                         help='Disable fast mode (longer waits, normal loading).')
+    parser.add_argument('--force', action='store_true',
+                        help='Force a new scrape even if this month is already saved.')
     args = parser.parse_args()
+
+    if not args.force and _already_scraped_this_month(ATW_FUNDAMENTAL_JSON):
+        logger.info("Monthly fundamentals already scraped for this month. Use --force to run again.")
+        return
 
     scraper: Optional[SeleniumScraper] = SeleniumScraper(
         headless=not args.headful,
@@ -1539,23 +1907,12 @@ def main():
         mode_label = "PERIODIC"
         speed_label = "FAST" if not args.slow else "SLOW"
 
-        logger.info(f"\n▶ Scraping {symbol} — {ATW_NAME} ({mode_label}, {speed_label})")
+        logger.info(f"\n▶ Scraping {symbol} — {ATW_NAME} ({mode_label}, {speed_label}, MONTHLY)")
         stock_data = scraper.scrape(symbol, url_code)
 
-        # Merge market fields with Bourse Casa using ATW-first priority rules.
-        bourse_overrides = _load_bourse_market_overrides(symbol)
-        _apply_market_overrides(stock_data, bourse_overrides)
-
-        # Keep JSON cache for continuity.
-        with open(ATW_CACHE_JSON, 'w', encoding='utf-8') as f:
-            json.dump(asdict(stock_data), f, indent=2, default=str, ensure_ascii=False)
-
-        # Save merged + normalized payloads.
-        _save_merged_and_normalized(stock_data, bourse_overrides)
-
-        # Main required output.
-        _save_atw_fondamental_csv(stock_data, ATW_OUTPUT_CSV)
-        _print_summary(stock_data, ATW_OUTPUT_CSV)
+        # Main required output: fundamentals-only monthly JSON.
+        _save_atw_fondamental_json(stock_data, ATW_FUNDAMENTAL_JSON)
+        _print_summary(stock_data, ATW_FUNDAMENTAL_JSON)
 
     finally:
         if scraper is not None:
