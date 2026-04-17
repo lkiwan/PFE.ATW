@@ -1,0 +1,7 @@
+pandas
+numpy
+requests
+certifi
+yfinance
+beautifulsoup4
+trafilatura
