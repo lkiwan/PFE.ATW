@@ -1,0 +1,77 @@
+[
+  {
+    "scraped_at": "2026-04-18T14:52:04+01:00",
+    "market_status": "OPEN",
+    "technicals": {
+      "as_of_date": "2026-04-17",
+      "last_close": 715.0,
+      "trend": "UPTREND",
+      "moving_averages": {
+        "SMA_20": 694.65,
+        "SMA_50": 711.47,
+        "SMA_200": 734.87,
+        "EMA_12": 700.85,
+        "EMA_26": 700.78,
+        "price_vs_SMA50": "ABOVE",
+        "price_vs_SMA200": "BELOW"
+      },
+      "RSI": {
+        "value": 56.38,
+        "signal": "NEUTRAL"
+      },
+      "MACD": {
+        "macd_line": 0.06,
+        "signal_line": -3.54,
+        "histogram": 3.6,
+        "signal": "BULLISH"
+      },
+      "bollinger_bands": {
+        "upper": 716.74,
+        "middle": 694.65,
+        "lower": 672.56,
+        "percent_b": 0.961,
+        "bandwidth": 0.0636,
+        "signal": "NEUTRAL"
+      },
+      "stochastic": {
+        "K": 83.33,
+        "D": 79.63,
+        "signal": "OVERBOUGHT"
+      },
+      "ATR_14": 12.61,
+      "ATR_14_pct": 0.0176,
+      "VWAP_20d": 697.76,
+      "support_resistance": {
+        "support_20d": 675.0,
+        "resistance_20d": 723.0
+      },
+      "returns": {
+        "ret_1d": 0.0171,
+        "ret_5d": 0.0056,
+        "ret_20d": 0.0001,
+        "ret_60d": -0.0083
+      },
+      "realized_vol_20d_ann": 0.2531,
+      "fifty_two_week": {
+        "high": 804.0,
+        "low": 625.2,
+        "pct_from_high": -0.1107,
+        "pct_from_low": 0.1436
+      },
+      "OBV": {
+        "value": 6193896.0,
+        "slope_20d": "RISING"
+      },
+      "ADX": {
+        "value": 14.46,
+        "plus_DI": 26.56,
+        "minus_DI": 19.22,
+        "signal": "NO_TREND"
+      },
+      "MFI_14": {
+        "value": 52.75,
+        "signal": "NEUTRAL"
+      }
+    }
+  }
+]

@@ -60,7 +60,7 @@ OUTPUT_COLUMNS = [
     "gold_usd",
     "vix",
     "sp500_close",
-    "eem_close",
+    "em_close",
     "us10y_yield",
     "masi_close",
     "gdp_ci",
@@ -79,7 +79,7 @@ PHASE1_COLUMNS = [
     "usd_mad",
     "brent_usd",
     "vix",
-    "eem_close",
+    "em_close",
     "masi_close",
 ]
 
@@ -87,7 +87,9 @@ PHASE1_COLUMNS = [
 WORLD_BANK_MA = {
     "gdp_growth_pct": "NY.GDP.MKTP.KD.ZG",
     "current_account_pct_gdp": "BN.CAB.XOKA.GD.ZS",
-    "public_debt_pct_gdp": "GC.DOD.TOTL.GD.ZS",
+    # GC.DOD.TOTL.GD.ZS is CENTRAL government debt (~51% for MA) — kept as WB fallback only.
+    # Primary source for public_debt_pct_gdp is IMF GGXWDG_NGDP (general government gross debt, ~67-70%).
+    "public_debt_pct_gdp_wb": "GC.DOD.TOTL.GD.ZS",
     "inflation_cpi_pct_wb": "FP.CPI.TOTL.ZG",
 }
 
@@ -104,11 +106,16 @@ YF_CANDIDATES = {
     "eur_mad": ["EURMAD=X"],
     "usd_mad": ["USDMAD=X"],
     "brent_usd": ["BZ=F"],
+    # NOTE: "WEAT" is the Teucrium Wheat Fund ETF (USD/share, ~$20-25 range),
+    # NOT CME wheat futures. Futures would be ZW=F in cents/bushel. The column
+    # name wheat_usd refers to the ETF share price in USD.
     "wheat_usd": ["WEAT"],
     "gold_usd": ["GC=F"],
     "vix": ["^VIX"],
     "sp500_close": ["^GSPC"],
-    "eem_close": ["EEM"],
+    # IEMG (iShares Core MSCI EM) tracks same index as EEM but cleaner yfinance
+    # bars; EEM retained as fallback in case IEMG data is unavailable.
+    "em_close": ["IEMG", "EEM"],
     "us10y_yield": ["^TNX"],
     "masi_close": ["MASI"],
 }
@@ -211,6 +218,10 @@ def fetch_yf_close(
     interval: str = "1d",
 ) -> pd.Series:
     """Fetches Close prices from yfinance using either period or start/end window."""
+    # Force explicit exclusive end = tomorrow, so today's close is always included
+    # and yfinance cannot silently return a stale forward-filled bar.
+    if end is None:
+        end = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     df = yf.download(
         tickers=ticker,
         period=None if start else period,
@@ -277,6 +288,15 @@ def collect_series(start_date: str | None = None) -> dict[str, pd.Series]:
         logger.warning("IMF PCPIPCH failed: %s", exc)
         series_map["inflation_cpi_pct_imf"] = pd.Series(dtype=float)
 
+    # IMF general government gross debt (% of GDP) — matches the ~67-70% figure
+    # for Morocco, unlike WB's central-government-only GC.DOD.TOTL.GD.ZS.
+    try:
+        series_map["public_debt_pct_gdp_imf"] = fetch_imf_datamapper_series("GGXWDG_NGDP", "MAR")
+        logger.info("IMF GGXWDG_NGDP -> public_debt_pct_gdp_imf (%d pts)", len(series_map["public_debt_pct_gdp_imf"]))
+    except (requests.RequestException, ValueError, OSError) as exc:
+        logger.warning("IMF GGXWDG_NGDP failed: %s", exc)
+        series_map["public_debt_pct_gdp_imf"] = pd.Series(dtype=float)
+
     # yfinance
     for output_col, candidates in YF_CANDIDATES.items():
         for ticker in candidates:
@@ -340,7 +360,6 @@ def build_daily_frame(
     direct_cols = [
         "gdp_growth_pct",
         "current_account_pct_gdp",
-        "public_debt_pct_gdp",
         "eur_mad",
         "usd_mad",
         "brent_usd",
@@ -348,7 +367,7 @@ def build_daily_frame(
         "gold_usd",
         "vix",
         "sp500_close",
-        "eem_close",
+        "em_close",
         "us10y_yield",
         "masi_close",
         "gdp_ci",
@@ -363,6 +382,13 @@ def build_daily_frame(
     infl_wb = _to_daily_ffill(series_map.get("inflation_cpi_pct_wb", pd.Series(dtype=float)), full_index)
     infl_imf = _to_daily_ffill(series_map.get("inflation_cpi_pct_imf", pd.Series(dtype=float)), full_index)
     df["inflation_cpi_pct"] = infl_wb.combine_first(infl_imf)
+
+    # Public debt precedence: IMF general government gross debt -> WB central gov't debt.
+    # IMF GGXWDG_NGDP is the correct indicator (~67-70% for Morocco); WB GC.DOD.TOTL.GD.ZS
+    # covers central government only and underestimates by ~15-20 pp.
+    debt_imf = _to_daily_ffill(series_map.get("public_debt_pct_gdp_imf", pd.Series(dtype=float)), full_index)
+    debt_wb = _to_daily_ffill(series_map.get("public_debt_pct_gdp_wb", pd.Series(dtype=float)), full_index)
+    df["public_debt_pct_gdp"] = debt_imf.combine_first(debt_wb)
 
     # Required metadata + derived features
     df["frequency_tag"] = "daily_ffill"

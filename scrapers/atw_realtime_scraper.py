@@ -858,6 +858,39 @@ def _stochastic(high: pd.Series, low: pd.Series, close: pd.Series,
     return k, d
 
 
+def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    direction = np.sign(close.diff().fillna(0))
+    return (direction * volume.fillna(0)).cumsum()
+
+
+def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
+    h_l = high - low
+    h_pc = (high - close.shift(1)).abs()
+    l_pc = (low - close.shift(1)).abs()
+    tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+    # Wilder smoothing via EMA with alpha = 1/period
+    atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / period, min_periods=period).mean()
+    return adx, plus_di, minus_di
+
+
+def _mfi(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series, period: int = 14) -> pd.Series:
+    typical = (high + low + close) / 3
+    raw_flow = typical * volume
+    direction = np.sign(typical.diff().fillna(0))
+    pos_flow = raw_flow.where(direction > 0, 0.0).rolling(period, min_periods=period).sum()
+    neg_flow = raw_flow.where(direction < 0, 0.0).rolling(period, min_periods=period).sum()
+    ratio = pos_flow / neg_flow.replace(0, np.nan)
+    return 100 - (100 / (1 + ratio))
+
+
 def compute_technicals(symbol: str = TICKER) -> Dict[str, Any]:
     """Compute technical indicators from the EOD CSV.
 
@@ -916,6 +949,85 @@ def compute_technicals(symbol: str = TICKER) -> Dict[str, Any]:
     # --- Support / Resistance (20-day low/high) ---
     support_20 = float(low.tail(20).min()) if len(low) >= 20 else None
     resistance_20 = float(high.tail(20).max()) if len(high) >= 20 else None
+
+    # --- Returns & realized volatility (log returns, annualized at 252d) ---
+    log_ret = np.log(close / close.shift(1))
+    def _ret(n: int):
+        if len(close) <= n:
+            return None
+        prev = close.iloc[-1 - n]
+        if not pd.notna(prev) or prev == 0:
+            return None
+        return float(close.iloc[-1] / prev - 1.0)
+    ret_1d = _ret(1)
+    ret_5d = _ret(5)
+    ret_20d = _ret(20)
+    ret_60d = _ret(60)
+    rv_20 = log_ret.rolling(20, min_periods=20).std(ddof=0)
+    realized_vol_20d_ann = float(rv_20.iloc[-1] * np.sqrt(252)) if pd.notna(rv_20.iloc[-1]) else None
+
+    # --- 52-week high/low (252 trading days) ---
+    hi_52w_series = high.rolling(252, min_periods=60).max()
+    lo_52w_series = low.rolling(252, min_periods=60).min()
+    hi_52w = float(hi_52w_series.iloc[-1]) if pd.notna(hi_52w_series.iloc[-1]) else None
+    lo_52w = float(lo_52w_series.iloc[-1]) if pd.notna(lo_52w_series.iloc[-1]) else None
+    pct_from_52w_high = (last_close / hi_52w - 1.0) if hi_52w else None
+    pct_from_52w_low = (last_close / lo_52w - 1.0) if lo_52w else None
+
+    # --- Bollinger %B & bandwidth ---
+    bb_u_val = bb_upper.iloc[-1]
+    bb_l_val = bb_lower.iloc[-1]
+    bb_m_val = bb_mid.iloc[-1]
+    bb_percent_b = None
+    bb_bandwidth = None
+    if pd.notna(bb_u_val) and pd.notna(bb_l_val) and (bb_u_val - bb_l_val) != 0:
+        bb_percent_b = float((last_close - bb_l_val) / (bb_u_val - bb_l_val))
+    if pd.notna(bb_u_val) and pd.notna(bb_l_val) and pd.notna(bb_m_val) and bb_m_val != 0:
+        bb_bandwidth = float((bb_u_val - bb_l_val) / bb_m_val)
+
+    # --- ATR% (position sizing) ---
+    atr_val = atr_14.iloc[-1] if pd.notna(atr_14.iloc[-1]) else None
+    atr_pct = float(atr_val / last_close) if atr_val and last_close else None
+
+    # --- OBV ---
+    obv_val = None
+    obv_slope = None
+    if len(volume) > 0 and volume.sum() > 0:
+        obv_series = _obv(close, volume)
+        obv_val = float(obv_series.iloc[-1]) if pd.notna(obv_series.iloc[-1]) else None
+        if len(obv_series) > 20 and pd.notna(obv_series.iloc[-21]):
+            obv_slope = "RISING" if obv_series.iloc[-1] > obv_series.iloc[-21] else "FALLING"
+
+    # --- ADX ---
+    adx_series, pdi_series, mdi_series = _adx(high, low, close, 14)
+    adx_val = float(adx_series.iloc[-1]) if pd.notna(adx_series.iloc[-1]) else None
+    pdi_val = float(pdi_series.iloc[-1]) if pd.notna(pdi_series.iloc[-1]) else None
+    mdi_val = float(mdi_series.iloc[-1]) if pd.notna(mdi_series.iloc[-1]) else None
+
+    def _adx_signal():
+        if adx_val is None:
+            return "NO_DATA"
+        if adx_val >= 25:
+            return "STRONG_TREND"
+        if adx_val < 20:
+            return "NO_TREND"
+        return "WEAK_TREND"
+
+    # --- MFI (volume-weighted RSI) ---
+    mfi_val = None
+    if len(volume) > 0 and volume.sum() > 0:
+        mfi_series = _mfi(high, low, close, volume, 14)
+        if pd.notna(mfi_series.iloc[-1]):
+            mfi_val = float(mfi_series.iloc[-1])
+
+    def _mfi_signal():
+        if mfi_val is None:
+            return "NO_DATA"
+        if mfi_val > 80:
+            return "OVERBOUGHT"
+        if mfi_val < 20:
+            return "OVERSOLD"
+        return "NEUTRAL"
 
     # --- Trend classification ---
     def _trend():
@@ -1008,6 +1120,8 @@ def compute_technicals(symbol: str = TICKER) -> Dict[str, Any]:
             "upper": _safe_round(bb_upper.iloc[-1]),
             "middle": _safe_round(bb_mid.iloc[-1]),
             "lower": _safe_round(bb_lower.iloc[-1]),
+            "percent_b": _safe_round(bb_percent_b, 3),
+            "bandwidth": _safe_round(bb_bandwidth, 4),
             "signal": _bb_signal(),
         },
         "stochastic": {
@@ -1016,10 +1130,38 @@ def compute_technicals(symbol: str = TICKER) -> Dict[str, Any]:
             "signal": _stoch_signal(),
         },
         "ATR_14": _safe_round(atr_14.iloc[-1]),
+        "ATR_14_pct": _safe_round(atr_pct, 4),
         "VWAP_20d": vwap,
         "support_resistance": {
             "support_20d": _safe_round(support_20),
             "resistance_20d": _safe_round(resistance_20),
+        },
+        "returns": {
+            "ret_1d": _safe_round(ret_1d, 4),
+            "ret_5d": _safe_round(ret_5d, 4),
+            "ret_20d": _safe_round(ret_20d, 4),
+            "ret_60d": _safe_round(ret_60d, 4),
+        },
+        "realized_vol_20d_ann": _safe_round(realized_vol_20d_ann, 4),
+        "fifty_two_week": {
+            "high": _safe_round(hi_52w),
+            "low": _safe_round(lo_52w),
+            "pct_from_high": _safe_round(pct_from_52w_high, 4),
+            "pct_from_low": _safe_round(pct_from_52w_low, 4),
+        },
+        "OBV": {
+            "value": _safe_round(obv_val, 0) if obv_val is not None else None,
+            "slope_20d": obv_slope,
+        },
+        "ADX": {
+            "value": _safe_round(adx_val),
+            "plus_DI": _safe_round(pdi_val),
+            "minus_DI": _safe_round(mdi_val),
+            "signal": _adx_signal(),
+        },
+        "MFI_14": {
+            "value": _safe_round(mfi_val),
+            "signal": _mfi_signal(),
         },
     }
 

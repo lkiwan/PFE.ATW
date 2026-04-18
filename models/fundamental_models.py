@@ -583,10 +583,18 @@ class GrahamModel(BaseValuationModel):
         if ncav is not None:
             results["ncav_per_share"] = round(ncav, 2)
 
-        if graham_growth and graham_growth > 0:
+        # Graham Number is a defensive floor; Graham Growth is a growth-adjusted
+        # ceiling. When both are available, average them — Graham Growth alone
+        # runs hot for fast-compounding companies like banks.
+        if graham_number and graham_number > 0 and graham_growth and graham_growth > 0:
+            primary = (graham_number + graham_growth) / 2
+            results["fair_value_method"] = "average(graham_number, graham_growth)"
+        elif graham_growth and graham_growth > 0:
             primary = graham_growth
+            results["fair_value_method"] = "graham_growth_only"
         elif graham_number and graham_number > 0:
             primary = graham_number
+            results["fair_value_method"] = "graham_number_only"
         else:
             return ValuationResult(
                 model_name="Graham",
@@ -611,9 +619,22 @@ class GrahamModel(BaseValuationModel):
             details=results,
         )
 
+    def _latest_reported_year(self) -> Optional[str]:
+        # Shareholders' equity isn't forecast, so its latest year is a reliable
+        # "reported" cutoff that lets us discard forward EPS estimates.
+        equity = self._get_hist_values("financials", "shareholders_equity")
+        if equity:
+            return max(equity.keys())
+        return None
+
     def _get_eps(self) -> Optional[float]:
+        cutoff = self._latest_reported_year()
         eps_data = self._get_hist_values("financials", "eps")
         if eps_data:
+            if cutoff:
+                realized = {y: v for y, v in eps_data.items() if y <= cutoff}
+                if realized:
+                    return realized[max(realized.keys())]
             return eps_data[max(eps_data.keys())]
         eps_hist = self._get_hist_values("valuation", "eps_hist")
         if eps_hist:
@@ -625,13 +646,21 @@ class GrahamModel(BaseValuationModel):
         if bvps:
             return bvps[max(bvps.keys())]
 
-        equity = self._get_financial("shareholders_equity", "2025")
+        equity = self._get_hist_values("financials", "shareholders_equity")
         if equity:
-            return (equity * 1_000_000) / NUM_SHARES
+            latest_equity = equity[max(equity.keys())]
+            return (latest_equity * 1_000_000) / NUM_SHARES
         return None
 
     def _estimate_growth_rate(self) -> Optional[float]:
+        # Use realized years only and cap at 10% — Graham himself warned the
+        # formula breaks down beyond that, and forward forecasts or trough-year
+        # endpoints will otherwise blow up the multiplier.
+        cutoff = self._latest_reported_year()
+
         eps_data = self._get_hist_values("financials", "eps")
+        if cutoff:
+            eps_data = {y: v for y, v in eps_data.items() if y <= cutoff}
         if len(eps_data) >= 2:
             years = sorted(eps_data.keys())
             first_val = eps_data[years[0]]
@@ -639,16 +668,18 @@ class GrahamModel(BaseValuationModel):
             n_years = int(years[-1]) - int(years[0])
             if first_val and first_val > 0 and last_val and n_years > 0:
                 cagr = (last_val / first_val) ** (1 / n_years) - 1
-                return cagr * 100
+                return min(cagr * 100, 10.0)
 
         sales = self._get_hist_values("financials", "net_sales")
+        if cutoff:
+            sales = {y: v for y, v in sales.items() if y <= cutoff}
         if len(sales) >= 2:
             years = sorted(sales.keys())
             first_val = sales[years[0]]
             last_val = sales[years[-1]]
             n_years = int(years[-1]) - int(years[0])
             if first_val and first_val > 0 and n_years > 0:
-                return ((last_val / first_val) ** (1 / n_years) - 1) * 100
+                return min(((last_val / first_val) ** (1 / n_years) - 1) * 100, 10.0)
 
         return 3.0
 
@@ -897,12 +928,14 @@ class MonteCarloModel(BaseValuationModel):
 
     def calculate(self) -> ValuationResult:
         base_revenue = self._get_base_revenue()
-        base_ebitda_margin = self._get_base_margin()
+        base_margin, margin_type = self._get_base_margin()
+        base_growth = self._get_base_growth()
         base_capex_ratio = self._get_capex_ratio()
         net_debt = self._get_net_debt()
         cash = self._get_cash()
+        bank_mode = margin_type == "net"
 
-        if not base_revenue or not base_ebitda_margin:
+        if not base_revenue or not base_margin:
             return ValuationResult(
                 model_name="Monte Carlo",
                 intrinsic_value=0,
@@ -911,28 +944,37 @@ class MonteCarloModel(BaseValuationModel):
             )
 
         np.random.seed(42)
-        rev_growth = np.random.normal(0.015, 0.020, self.N_SIMULATIONS)
-        margin = np.random.normal(base_ebitda_margin / 100, 0.05, self.N_SIMULATIONS)
-        margin = np.clip(margin, 0.15, 0.70)
+        rev_growth = np.random.normal(base_growth, 0.025, self.N_SIMULATIONS)
+        margin = np.random.normal(base_margin / 100, 0.04, self.N_SIMULATIONS)
+        if bank_mode:
+            # Net margin (post-tax): banks cluster 10–40%, no realistic upside beyond ~45%.
+            margin = np.clip(margin, 0.05, 0.45)
+        else:
+            margin = np.clip(margin, 0.15, 0.70)
         wacc = np.random.uniform(0.065, 0.095, self.N_SIMULATIONS)
         terminal_g = np.random.uniform(0.015, 0.035, self.N_SIMULATIONS)
-        capex_pct = np.random.normal(base_capex_ratio, 0.02, self.N_SIMULATIONS)
-        capex_pct = np.clip(capex_pct, 0.05, 0.30)
+        if bank_mode:
+            # Capex is immaterial for banks; don't drag FCF down with a dev-cap proxy.
+            capex_pct = np.zeros(self.N_SIMULATIONS)
+        else:
+            capex_pct = np.random.normal(base_capex_ratio, 0.02, self.N_SIMULATIONS)
+            capex_pct = np.clip(capex_pct, 0.05, 0.30)
 
         fair_values = np.zeros(self.N_SIMULATIONS)
         for i in range(self.N_SIMULATIONS):
             fair_values[i] = self._simulate_dcf(
                 base_revenue=base_revenue,
                 rev_growth=rev_growth[i],
-                ebitda_margin=margin[i],
+                margin=margin[i],
                 capex_pct=capex_pct[i],
                 wacc=wacc[i],
                 terminal_g=terminal_g[i],
                 net_debt=net_debt,
                 cash=cash,
+                bank_mode=bank_mode,
             )
 
-        fair_values = fair_values[(fair_values > 0) & (fair_values < 1000)]
+        fair_values = fair_values[(fair_values > 0) & (fair_values < 5000)]
         if len(fair_values) == 0:
             return ValuationResult(
                 model_name="Monte Carlo",
@@ -969,7 +1011,10 @@ class MonteCarloModel(BaseValuationModel):
                 "prob_above_current_price_pct": round(prob_above_price, 1),
                 "valid_simulations": len(fair_values),
                 "base_revenue_m": round(base_revenue, 0),
-                "base_ebitda_margin_pct": round(base_ebitda_margin, 1),
+                "base_margin_pct": round(base_margin, 1),
+                "base_margin_type": margin_type,
+                "base_growth_pct": round(base_growth * 100, 2),
+                "mode": "bank" if bank_mode else "corporate",
             },
         )
 
@@ -977,20 +1022,25 @@ class MonteCarloModel(BaseValuationModel):
         self,
         base_revenue: float,
         rev_growth: float,
-        ebitda_margin: float,
+        margin: float,
         capex_pct: float,
         wacc: float,
         terminal_g: float,
         net_debt: float,
         cash: float,
+        bank_mode: bool = False,
     ) -> float:
         revenue = base_revenue
         fcfs: List[float] = []
         for _ in range(self.FORECAST_YEARS):
             revenue *= 1 + rev_growth
-            ebitda = revenue * ebitda_margin
-            capex = revenue * capex_pct
-            fcf = ebitda * (1 - CORPORATE_TAX_RATE) - capex
+            if bank_mode:
+                # Net margin is already post-tax; banks have negligible capex.
+                fcf = revenue * margin
+            else:
+                ebitda = revenue * margin
+                capex = revenue * capex_pct
+                fcf = ebitda * (1 - CORPORATE_TAX_RATE) - capex
             fcfs.append(fcf)
 
         terminal_fcf = fcfs[-1]
@@ -1017,15 +1067,33 @@ class MonteCarloModel(BaseValuationModel):
         latest = max(sales.keys())
         return sales.get(latest) or 0
 
-    def _get_base_margin(self) -> float:
-        # EBITDA margin first; fall back to EBIT margin for banks where EBITDA
-        # isn't reported.
-        for margin_field in ("ebitda_margin", "ebit_margin"):
+    def _get_base_margin(self) -> tuple[float, str]:
+        # EBITDA > EBIT > net margin (bank-appropriate). Return label so the
+        # simulation knows whether to apply tax + capex deductions.
+        for margin_field, label in (
+            ("ebitda_margin", "ebitda"),
+            ("ebit_margin", "ebit"),
+            ("net_margin", "net"),
+        ):
             margins = self._get_hist_values("financials", margin_field)
-            for year in ["2025", "2024", "2023"]:
-                if year in margins and margins[year]:
-                    return margins[year]
-        return 45.0
+            # Use median of last 3 reported years to smooth through cycles.
+            recent = [margins[y] for y in ("2023", "2024", "2025") if margins.get(y)]
+            if recent:
+                return statistics.median(recent), label
+        return 45.0, "ebitda"
+
+    def _get_base_growth(self) -> float:
+        rev = self._get_hist_values("financials", "net_sales")
+        years_int = sorted(int(y) for y in rev if rev[y])
+        if len(years_int) >= 3:
+            first = rev[str(years_int[0])]
+            last = rev[str(years_int[-1])]
+            span = years_int[-1] - years_int[0]
+            if first and first > 0 and span > 0:
+                cagr = (last / first) ** (1 / span) - 1
+                # Cap at 10% — sustained double-digit NBI growth is unrealistic long-term.
+                return max(min(cagr, 0.10), 0.01)
+        return 0.03
 
     def _get_capex_ratio(self) -> float:
         capex = self._get_hist_values("financials", "capex")

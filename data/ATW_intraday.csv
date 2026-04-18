@@ -1,0 +1,2 @@
+﻿timestamp,cotation,market_status,last_price,open,high,low,prev_close,variation_pct,shares_traded,value_traded_mad,num_trades,market_cap
+2026-04-18T14:52:04+01:00,2026-04-17T15:39+01:00,OPEN,715.0,715.0,723.0,701.1,703.0,1.71,201683,144203345.0,325,153825699885.0

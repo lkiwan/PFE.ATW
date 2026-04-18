@@ -1,6 +1,6 @@
 {
   "symbol": "ATW",
-  "scrape_timestamp": "2026-04-17T22:44:52.035313+00:00",
+  "scrape_timestamp": "2026-04-18T13:53:32.406753+00:00",
   "price_to_book": 1.74,
   "hist_revenue": {
     "2020": 18330.0,
@@ -145,6 +145,6 @@
   "data_source": {
     "marketscreener_periodic": true,
     "merged_with_realtime": false,
-    "generated_at": "2026-04-17T22:45:29.768229+00:00"
+    "generated_at": "2026-04-18T13:54:08.181824+00:00"
   }
 }

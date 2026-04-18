@@ -47,10 +47,28 @@ Behavior:
 
 Minimum inputs by model:
 - `DDM`: `hist_dividend_per_share`
-- `Graham`: `hist_eps` + `hist_equity` (or book value per share)
-- `DCF`: `hist_fcf` **or** (`hist_ebitda` + `hist_capex`)
-- `Monte Carlo`: `hist_revenue` (mapped as `net_sales`)
-- `Relative`: historical multiples (`pe_ratio_hist`, `ev_ebitda_hist`, `pbr_hist`, `ev_revenue_hist`, `fcf_yield_hist`) plus supporting financial fields
+- `Graham`: `hist_eps` + `hist_equity` (or `hist_book_value_per_share`)
+- `DCF`: `hist_fcf` **or** (`hist_ebitda` + `hist_capex`) — falls back to `hist_ebit` for banks
+- `Monte Carlo`: `hist_revenue` (mapped as `net_sales`) + `hist_ebitda_margin` / `hist_ebit_margin` / `hist_net_margin`
+- `Relative`: historical multiples (`pe_ratio_hist`, `ev_ebitda_hist`, `pbr_hist`, `ev_revenue_hist`, `fcf_yield_hist`) plus supporting financial fields — falls back to `ev_ebit_hist` + `hist_ebit` for banks
+
+### Bank-aware model behavior
+Banks (e.g., ATW) don't report EBITDA and use Net Banking Income instead of revenue. The models auto-detect and adapt:
+- **DCF** — uses `hist_ebit × (1 − tax)` when `hist_ebitda` is absent.
+- **Relative Valuation** — blends `ev_ebit_hist × hist_ebit` when `ev_ebitda_hist` / `hist_ebitda` are absent; details report `multiple_used: "EV/EBIT"`.
+- **Monte Carlo** — when only `hist_net_margin` is available, switches to bank mode: `fcf = revenue × net_margin` (net margin is already post-tax, capex is immaterial for banks). Growth baseline uses historical NBI CAGR (capped at 10%). Details include `mode: "bank"`, `base_margin_type`, `base_growth_pct`.
+- **Graham** — growth CAGR restricted to realized years (excludes forecasts), capped at 10% per Graham's own guidance; EPS uses latest reported year (not forward forecast); fair value averages Graham Number (defensive floor) and Graham Growth Formula (ceiling).
+
+### Historical fields scraped from MarketScreener `/valuation/`
+In addition to financials, the scraper pulls these per-year series (2020–2027 where reported):
+- `pe_ratio_hist`, `pbr_hist`, `ev_revenue_hist`, `ev_ebit_hist`, `ev_ebitda_hist`
+- `capitalization_hist` (M MAD), `hist_ebit` (M MAD)
+- Computed: `hist_fcf = hist_ocf − |hist_capex|`, `fcf_yield_hist = hist_fcf / capitalization_hist`
+- Revenue fallback for banks: scrapes "Net Banking Income" / "PNB" labels; if missing, derives `hist_revenue = capitalization_hist / ev_revenue_hist`.
+
+Null-handling rules:
+- MarketScreener "—" and "0x" placeholders are parsed as null (not zero).
+- `hist_ebitda` and `ev_ebitda_hist` stay null for banks; downstream models use the EBIT fallbacks above.
 
 ## Minimal 2-file workflow (recommended)
 1. Update daily market file:
