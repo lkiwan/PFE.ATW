@@ -86,7 +86,7 @@ STATE_DIR = _ROOT / "data"
 STATE_FILE = STATE_DIR / "atw_realtime_state.json"
 EOD_CSV = DATA_DIR / "ATW_bourse_casa_full.csv"
 INTRADAY_CSV = DATA_DIR / "ATW_intraday.csv"
-TECHNICALS_JSON = DATA_DIR / "ATW_technicals.json"
+
 
 TICKER = "ATW"
 ATW_ISIN = "MA0000012445"
@@ -431,32 +431,15 @@ def write_orderbook(ob: OrderBook, day: str) -> Path:
     return path
 
 
-def _append_technicals_snapshot(
+def _merge_technicals_into_state(
+    state: Dict[str, Any],
     technicals: Dict[str, Any],
-    scraped_at: str,
-    market_status: str,
-) -> Path:
-    entry = {
-        "scraped_at": scraped_at,
-        "market_status": market_status,
-        "technicals": technicals,
-    }
-    history: List[Dict[str, Any]] = []
-    if TECHNICALS_JSON.exists():
-        try:
-            with open(TECHNICALS_JSON, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            if isinstance(payload, list):
-                history = [x for x in payload if isinstance(x, dict)]
-            elif isinstance(payload, dict):
-                history = [{"scraped_at": "", "market_status": "", "technicals": payload}]
-        except (json.JSONDecodeError, OSError):
-            history = []
-    history.append(entry)
-    TECHNICALS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    with open(TECHNICALS_JSON, "w", encoding="utf-8") as f:
-        json.dump(history, f, indent=2, ensure_ascii=False)
-    return TECHNICALS_JSON
+) -> None:
+    """Merge computed technicals flat into the state dict (no separate file).
+       Pops and re-inserts to ensure it appears at the end of the JSON.
+    """
+    state.pop("technicals", None)
+    state["technicals"] = technicals
 
 
 # --- Subcommands -------------------------------------------------------------
@@ -505,16 +488,22 @@ def cmd_snapshot(args) -> int:
                 if save_raw:
                     write_intraday(cached)
                 _log_summary(cached)
+                # Update state with cached snapshot values
+                state["last_snapshot_ts"] = cached.timestamp
+                state["last_snapshot_cotation"] = cached.cotation
+                for k in ("last_price", "open", "high", "low", "prev_close",
+                          "variation_pct", "shares_traded", "value_traded_mad",
+                          "num_trades", "market_cap"):
+                    state[f"last_snapshot_{k}"] = getattr(cached, k)
+
                 if args.force or cached.market_status == "OPEN":
                     technicals = compute_technicals(TICKER)
-                    tech_file = _append_technicals_snapshot(
-                        technicals=technicals,
-                        scraped_at=cached.timestamp,
-                        market_status=cached.market_status,
-                    )
-                    logger.info("Technicals appended to %s", tech_file.name)
+                    _merge_technicals_into_state(state, technicals)
+                    logger.info("Technicals merged into state")
                 else:
-                    logger.info("Market closed — skipping technical append for %s", day)
+                    logger.info("Market closed — skipping technical merge for %s", day)
+
+                _save_state(state)
                 _auto_finalize_if_needed(now_casa)
                 return 0
         except ValueError:
@@ -543,24 +532,21 @@ def cmd_snapshot(args) -> int:
         write_intraday(snap)
         write_orderbook(ob, day)
     _log_summary(snap, ob)
-    if args.force or snap.market_status == "OPEN":
-        technicals = compute_technicals(TICKER)
-        tech_file = _append_technicals_snapshot(
-            technicals=technicals,
-            scraped_at=snap.timestamp,
-            market_status=snap.market_status,
-        )
-        logger.info("Technicals appended to %s", tech_file.name)
-    else:
-        logger.info("Market closed — skipping technical append for %s", day)
-
-    # Persist state for debounce + stall detection
+    # Update state keys first (so they appear first in JSON)
     state["last_snapshot_ts"] = snap.timestamp
     state["last_snapshot_cotation"] = snap.cotation
     for k in ("last_price", "open", "high", "low", "prev_close",
               "variation_pct", "shares_traded", "value_traded_mad",
               "num_trades", "market_cap"):
         state[f"last_snapshot_{k}"] = getattr(snap, k)
+
+    if args.force or snap.market_status == "OPEN":
+        technicals = compute_technicals(TICKER)
+        _merge_technicals_into_state(state, technicals)
+        logger.info("Technicals merged into state")
+    else:
+        logger.info("Market closed — skipping technical merge for %s", day)
+
     _save_state(state)
     _auto_finalize_if_needed(now_casa)
     return 0
@@ -800,20 +786,25 @@ def _load_eod_dataframe() -> Optional[pd.DataFrame]:
     df = pd.concat(frames, ignore_index=True, sort=False)
 
     col_map = {}
+    used_targets = set()
     for col in df.columns:
         cl = col.strip().lower()
+        target = None
         if "ance" in cl or cl in ("date", "séance", "seance"):
-            col_map[col] = "Date"
+            target = "Date"
         elif cl in ("ouverture",):
-            col_map[col] = "Open"
+            target = "Open"
         elif "haut" in cl:
-            col_map[col] = "High"
+            target = "High"
         elif "bas" in cl:
-            col_map[col] = "Low"
+            target = "Low"
         elif "dernier" in cl or "closing" in cl:
-            col_map[col] = "Close"
+            target = "Close"
         elif "titres" in cl:
-            col_map[col] = "Volume"
+            target = "Volume"
+        if target and target not in used_targets:
+            col_map[col] = target
+            used_targets.add(target)
     df = df.rename(columns=col_map)
     for c in ("Open", "High", "Low", "Close", "Volume"):
         if c in df.columns:
