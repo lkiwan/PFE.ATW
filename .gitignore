@@ -21,3 +21,8 @@ ENV/
 
 # Data (Optional: usually ignored if large, but here user wants to save the project)
 # data/test_*
+
+# Docker / DB
+postgres_data/
+pgadmin_data/
+.env

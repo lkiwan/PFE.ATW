@@ -5,3 +5,6 @@ certifi
 yfinance
 beautifulsoup4
 trafilatura
+sqlalchemy
+psycopg[binary]
+python-dotenv
