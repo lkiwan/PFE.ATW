@@ -1,16 +1,16 @@
 {
-  "last_snapshot_ts": "2026-04-20T16:12:28+01:00",
-  "last_snapshot_cotation": "2026-04-20T15:08+01:00",
-  "last_snapshot_last_price": 708.1,
-  "last_snapshot_open": 703.0,
-  "last_snapshot_high": 710.0,
-  "last_snapshot_low": 703.0,
-  "last_snapshot_prev_close": 715.0,
-  "last_snapshot_variation_pct": -0.97,
-  "last_snapshot_shares_traded": 27019,
-  "last_snapshot_value_traded_mad": 19132153.0,
-  "last_snapshot_num_trades": 93,
-  "last_snapshot_market_cap": 152341228095.9,
+  "last_snapshot_ts": "2026-04-21T16:18:32+01:00",
+  "last_snapshot_cotation": "2026-04-21T15:32+01:00",
+  "last_snapshot_last_price": 715.0,
+  "last_snapshot_open": 715.0,
+  "last_snapshot_high": 716.0,
+  "last_snapshot_low": 706.0,
+  "last_snapshot_prev_close": 710.0,
+  "last_snapshot_variation_pct": 0.7,
+  "last_snapshot_shares_traded": 30247,
+  "last_snapshot_value_traded_mad": 21626605.0,
+  "last_snapshot_num_trades": 122,
+  "last_snapshot_market_cap": 153825699885.0,
   "technicals": {
     "as_of_date": "2026-04-17",
     "last_close": 715.0,
@@ -83,6 +83,7 @@
     }
   },
   "finalized_days": [
-    "2026-04-20"
+    "2026-04-20",
+    "2026-04-21"
   ]
 }

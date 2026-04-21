@@ -529,6 +529,17 @@ def main() -> int:
     final_df = write_output(daily_df, args.out, full_refresh=args.full_refresh)
 
     log_summary(final_df)
+
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from database import AtwDatabase
+        with AtwDatabase() as db:
+            n = db.save_macro(final_df)
+            logger.info("DB: %d macro rows submitted (conflicts skipped).", n)
+    except Exception as e:
+        logger.warning("DB save skipped: %s", e)
+
     logger.info("Done.")
     return 0
 

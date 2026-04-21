@@ -35,7 +35,7 @@ def build_engine():
     host = os.environ.get("POSTGRES_HOST", "localhost")
     port = os.environ.get("POSTGRES_PORT", "5432")
     db = os.environ["POSTGRES_DB"]
-    return create_engine(f"postgresql+psycopg://{user}:{pw}@{host}:{port}/{db}")
+    return create_engine(f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}")
 
 
 def upsert_df(engine, table: str, df: pd.DataFrame, conflict_cols: list[str]):

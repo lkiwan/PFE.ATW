@@ -621,6 +621,22 @@ def cmd_finalize(args) -> int:
         EOD_CSV.name,
     )
 
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from database import AtwDatabase
+        import pandas as _pd
+        with AtwDatabase() as db:
+            n = db.save_bourse(_pd.DataFrame([{k: eod.get(k) for k in (
+                "Séance", "Instrument", "Ticker", "Ouverture", "Dernier Cours",
+                "+haut du jour", "+bas du jour",
+                "Nombre de titres échangés", "Volume des échanges",
+                "Nombre de transactions", "Capitalisation",
+            )}]))
+            logger.info("DB: %d bourse row submitted.", n)
+    except Exception as e:
+        logger.warning("DB save skipped: %s", e)
+
     finalized.add(day)
     state["finalized_days"] = sorted(finalized)
     _save_state(state)

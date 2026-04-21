@@ -871,3 +871,12 @@ if __name__ == "__main__":
     if items:
         total = merge_and_save_to_csv(items, DEFAULT_OUT)
         print(f"\nCSV saved: {DEFAULT_OUT} ({total} total rows)")
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from database import AtwDatabase
+            with AtwDatabase() as _db:
+                ins, enr = _db.save_news(items)
+                print(f"DB: +{ins} new, {enr} enriched with full_content")
+        except Exception as _e:
+            print(f"DB save skipped: {_e}")

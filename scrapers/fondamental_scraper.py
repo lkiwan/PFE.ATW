@@ -1446,6 +1446,16 @@ def _save_atw_fondamental_json(stock_data: StockData, output_file: Path) -> None
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from database import AtwDatabase
+        with AtwDatabase() as db:
+            snap, yearly = db.save_fondamental(payload)
+            print(f"  DB: fondamental_snapshot +{snap}, fondamental_yearly +{yearly}")
+    except Exception as e:
+        print(f"  DB save skipped: {e}")
+
 
 def _is_empty_value(value: Any) -> bool:
     if value is None:

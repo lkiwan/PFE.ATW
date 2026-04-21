@@ -23,7 +23,6 @@ No database writes. CSV is the only sink.
 """
 
 
-
 import csv
 import json
 import logging
@@ -74,33 +73,6 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 # --- Blocklists --------------------------------------------------------------
 
-BLOCKED_HOST_SUBSTRINGS = (
-    "attijariwafa", "attijari.com", "daralmoukawil.com",
-    "facebook.com", "instagram.com", "twitter.com", "threads.net",
-    "tiktok.com", "youtube.com", "youtu.be", "linkedin.com", "pinterest.",
-    "reddit.com", "bebee.com",
-    "waze.com", "openstreetmap", "foursquare", "yelp.",
-    "remitly.com", "wise.com", "wewire.com", "transferwise.com",
-    "worldremit.com", "xoom.com", "moneygram.com", "westernunion.com",
-    "paysend.com",
-    "rekrute.com", "emploi.ma", "anapec.org", "bayt.com", "indeed.com",
-    "glassdoor.com", "welcometothejungle.com", "jobzyn.com", "monster.com",
-    "bghit-nekhdem", "drh.ma",
-    "apps.apple.com", "play.google.com",
-    "lbankalik.ma",
-    "remittanceprices.worldbank.org",
-    "xe.com", "qonto.com", "globaldata.com", "euroquity.com", "viguier.com",
-    "wikipedia.org", "fsma.be",
-    "greenclimate.fund", "eib.org", "hps-worldwide.com",
-    "royalairmaroc.com", "airarabia.com",
-    "prnewswire.com", "businesswire.com",
-)
-
-BLOCKED_HOSTPATH_SUBSTRINGS = ("x.com/", "google.com/maps")
-
-WHITELISTED_HOST_SUFFIXES = ("ir.attijariwafabank.com", "attijaricib.com")
-
-BLOCKED_HOSTS: set[str] = set()
 
 ATW_TOKEN_RE = re.compile(
     r"\b(attijariwafa|attijari\s*wafa|\bATW\b)",
@@ -155,33 +127,6 @@ def fetch(url: str, timeout: int = REQUEST_TIMEOUT, retries: int = 1) -> Optiona
                 continue
             logger.warning("Fetch failed for %s: %s", url, exc)
     return None
-
-
-def resolve_final_url(url: str) -> str:
-    """Resolve a Google-News `rss/articles/CBMi...` URL to the real publisher
-    URL via googlenewsdecoder. For non-Google-News URLs, follow standard HTTP
-    redirects. Returns the original URL on failure.
-    """
-    if "news.google.com/rss/articles/" in url:
-        try:
-            from googlenewsdecoder import gnewsdecoder
-            result = gnewsdecoder(url, interval=1)
-            if isinstance(result, dict) and result.get("status") and result.get("decoded_url"):
-                return result["decoded_url"]
-        except Exception as exc:
-            logger.debug("gnewsdecoder failed for %s: %s", url[:80], exc)
-        return url
-
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True,
-        )
-        return resp.url or url
-    except requests.RequestException:
-        return url
 
 
 # --- Date parsing ------------------------------------------------------------
@@ -342,30 +287,6 @@ def mentions_atw(*fields: str) -> bool:
         if f and ATW_TOKEN_RE.search(f):
             return True
     return False
-
-
-def host_blocked(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if not host:
-            return False
-        if any(host == w or host.endswith("." + w) or host == w
-               for w in WHITELISTED_HOST_SUFFIXES):
-            return False
-        if host in BLOCKED_HOSTS:
-            return True
-        if any(sub in host for sub in BLOCKED_HOST_SUBSTRINGS):
-            return True
-        path = (parsed.path or "").lower()
-        if "/" in path[1:]:
-            first_seg = path[:path.index("/", 1) + 1]
-        else:
-            first_seg = path + "/"
-        hostpath = f"{host}{first_seg}"
-        return any(sub in hostpath for sub in BLOCKED_HOSTPATH_SUBSTRINGS)
-    except Exception:
-        return False
 
 
 def canonical_url(url: str) -> str:
@@ -580,12 +501,10 @@ def filter_since(articles: list[dict], since_iso: Optional[str]) -> list[dict]:
 
 # --- State -------------------------------------------------------------------
 
-def empty_state() -> dict:
     return {
         "seen_urls": {},
         "per_source_last_seen": {},
         "failed_body_urls": [],
-        "gnews_resolved": {},
         "last_full_run_ts": None,
     }
 
@@ -596,10 +515,7 @@ def load_state() -> dict:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             s = json.load(f)
-        s.setdefault("seen_urls", {})
-        s.setdefault("per_source_last_seen", {})
         s.setdefault("failed_body_urls", [])
-        s.setdefault("gnews_resolved", {})
         s.setdefault("last_full_run_ts", None)
         return s
     except (json.JSONDecodeError, OSError):
@@ -691,100 +607,6 @@ def merge_and_save_to_csv(new_items: list[dict], out_path: Path = DEFAULT_OUT) -
 
 # --- Body enrichment ---------------------------------------------------------
 
-def enrich_with_bodies(
-    articles: list[dict],
-    limit: Optional[int] = None,
-    existing: Optional[dict[str, dict]] = None,
-    failed_urls: Optional[set[str]] = None,
-    gnews_cache: Optional[dict[str, str]] = None,
-    state: Optional[dict] = None,
-    save_every: int = 20,
-) -> list[dict]:
-    total = len(articles)
-    existing = existing or {}
-    failed_urls = failed_urls or set()
-    gnews_cache = gnews_cache if gnews_cache is not None else {}
-    logger.info(
-        "Enriching %d articles (resolve Google News + fetch body)%s",
-        total,
-        f", body limit={limit}" if limit is not None else "",
-    )
-    kept: list[dict] = []
-    fetched = 0
-    reused = 0
-    skipped_failed = 0
-    for idx, a in enumerate(articles, 1):
-        url = a.get("url", "")
-        if not url:
-            kept.append(a)
-            continue
-
-        if "news.google.com" in url:
-            cached = gnews_cache.get(url)
-            if cached:
-                final_url = cached
-            else:
-                final_url = resolve_final_url(url)
-                if final_url and "news.google.com" not in final_url:
-                    gnews_cache[url] = final_url
-        else:
-            final_url = url
-        if "news.google.com" in final_url:
-            logger.debug("Dropped unresolved Google News URL: %s", final_url)
-            continue
-        if host_blocked(final_url):
-            logger.debug("Dropped after redirect (blocked host): %s", final_url)
-            continue
-        a["url"] = final_url
-
-        key = url_key(final_url)
-        prior = existing.get(key)
-        if prior and prior.get("full_content"):
-            a["full_content"] = prior["full_content"]
-            if not a.get("date"):
-                cached_date = (prior.get("date") or "").strip()
-                if cached_date:
-                    a["date"] = cached_date
-                else:
-                    page_date = fetch_article_date_only(final_url)
-                    if page_date:
-                        a["date"] = page_date
-                    time.sleep(POLITE_DELAY)
-            reused += 1
-        elif key in failed_urls:
-            skipped_failed += 1
-        elif limit is None or fetched < limit:
-            body, page_date = fetch_article_body(final_url)
-            if body:
-                a["full_content"] = body
-                if not a.get("date") and page_date:
-                    a["date"] = page_date
-                existing[key] = dict(a)
-                fetched += 1
-            else:
-                failed_urls.add(key)
-            time.sleep(POLITE_DELAY)
-
-        kept.append(a)
-        if idx % 10 == 0 or idx == total:
-            logger.info(
-                "  progress: %d/%d processed, %d fetched, %d reused, %d skipped-failed",
-                idx, total, fetched, reused, skipped_failed,
-            )
-
-        if state is not None and idx % save_every == 0:
-            state["failed_body_urls"] = sorted(failed_urls)
-            state["gnews_resolved"] = gnews_cache
-            try:
-                save_state(state)
-            except OSError as exc:
-                logger.warning("State checkpoint failed: %s", exc)
-
-    logger.info(
-        "Enriched %d/%d articles (fetched %d new, reused %d cached, skipped %d known-failed)",
-        fetched + reused, len(kept), fetched, reused, skipped_failed,
-    )
-    return kept
 
 # --- END INJECTED COMMON.PY ---
 
@@ -796,73 +618,72 @@ import requests
 from bs4 import BeautifulSoup
 
 
+LEBOURSIER_ATW_URL = (
+    "https://medias24.com/leboursier/fiche-action"
+    "?action=attijariwafa-bank&valeur=actualites"
+)
 
-# Discovered via /wp-json/wp/v2/tags?search=attijariwafa.
-MEDIAS24_WP_TAG_ATW = 8987
+_ARTICLE_URL_RE = re.compile(r"^https?://medias24\.com/\d{4}/\d{2}/\d{2}/[^/?#]+/?$")
+_URL_DATE_RE = re.compile(r"medias24\.com/(\d{4})/(\d{2})/(\d{2})/")
+
+
+def _title_from_slug(url: str) -> str:
+    m = re.search(r"/\d{4}/\d{2}/\d{2}/([^/?#]+)", url)
+    if not m:
+        return ""
+    slug = m.group(1).rstrip("-").replace("-", " ").strip()
+    return slug[:1].upper() + slug[1:] if slug else ""
 
 
 def scrape(
-    max_pages: int = 3,
+    max_pages: int = 1,
     known_url_keys: Optional[set[str]] = None,
 ) -> list[dict]:
-    logger.info("Direct scrape: Medias24 WP API (tag=%d)", MEDIAS24_WP_TAG_ATW)
+    logger.info("Direct scrape: Medias24 Le Boursier (%s)", LEBOURSIER_ATW_URL)
+    html = fetch(LEBOURSIER_ATW_URL)
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+
+    links: list[str] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not _ARTICLE_URL_RE.match(href):
+            continue
+        if href in seen:
+            continue
+        seen.add(href)
+        links.append(href)
+
+    logger.info("  -> %d article links found", len(links))
+
+    if known_url_keys is not None and links:
+        if url_key(links[0]) in known_url_keys:
+            logger.info("  -> source unchanged (top item known), skipped")
+            return []
+
     items: list[dict] = []
-    for page in range(1, max_pages + 1):
-        try:
-            r = requests.get(
-                "https://medias24.com/wp-json/wp/v2/posts",
-                params={
-                    "tags": MEDIAS24_WP_TAG_ATW,
-                    "per_page": 100,
-                    "page": page,
-                    "orderby": "date",
-                    "order": "desc",
-                    "_fields": "id,date,link,title,excerpt",
-                },
-                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-                timeout=REQUEST_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            logger.warning("Medias24 WP API page %d failed: %s", page, exc)
-            break
-        if r.status_code == 400:
-            break
-        if r.status_code != 200:
-            logger.warning("Medias24 WP API page %d HTTP %s", page, r.status_code)
-            break
-        try:
-            batch = r.json()
-        except ValueError:
-            break
-        if not isinstance(batch, list) or not batch:
-            break
-        if known_url_keys is not None:
-            first_link = (batch[0].get("link", "") or "") if batch else ""
-            if first_link and url_key(first_link) in known_url_keys:
-                if page == 1:
-                    logger.info("  -> source unchanged (top item known), skipped")
-                    return []
-                logger.info("  page %d: top item known, stopping pagination", page)
-                break
-        for p in batch:
-            link = p.get("link", "") or ""
-            title_html = (p.get("title") or {}).get("rendered", "") or ""
-            excerpt_html = (p.get("excerpt") or {}).get("rendered", "") or ""
-            title = BeautifulSoup(title_html, "html.parser").get_text(" ", strip=True)
-            excerpt = BeautifulSoup(excerpt_html, "html.parser").get_text(" ", strip=True)
-            if not link or not title:
-                continue
-            items.append({
-                "date": parse_date(p.get("date", "")),
-                "title": title,
-                "source": "Medias24",
-                "url": link,
-                "snippet": excerpt,
-                "full_content": "",
-                "query_source": "direct:medias24_wp",
-            })
+    enriched = 0
+    for link in links:
+        body, body_date = fetch_article_body(link)
+        m = _URL_DATE_RE.search(link)
+        url_date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else ""
+        date = body_date or url_date
+        title = _title_from_slug(link)
+        items.append({
+            "date": date,
+            "title": title,
+            "source": "Medias24",
+            "url": link,
+            "snippet": "",
+            "full_content": body or "",
+            "query_source": "direct:medias24_leboursier",
+        })
+        if body:
+            enriched += 1
         time.sleep(POLITE_DELAY)
-    logger.info("  -> %d items", len(items))
+    logger.info("  -> enriched full_content for %d/%d items", enriched, len(items))
     return items
 
 
@@ -885,3 +706,12 @@ if __name__ == "__main__":
     if not args.no_save:
         total = merge_and_save_to_csv(items, DEFAULT_OUT)
         print(f"\nCSV saved: {DEFAULT_OUT} ({total} total rows)")
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from database import AtwDatabase
+            with AtwDatabase() as _db:
+                ins, enr = _db.save_news(items)
+                print(f"DB: +{ins} new, {enr} enriched with full_content")
+        except Exception as _e:
+            print(f"DB save skipped: {_e}")
