@@ -20,6 +20,12 @@ NEWS_COLUMNS = [
     "query_source", "signal_score", "is_atw_core", "scraping_date",
 ]
 
+INTRADAY_COLUMNS = [
+    "snapshot_ts", "cotation_ts", "ticker", "market_status", "last_price",
+    "open", "high", "low", "prev_close", "variation_pct",
+    "shares_traded", "value_traded_mad", "num_trades", "market_cap",
+]
+
 BOURSE_RENAME = {
     "Séance": "seance",
     "Instrument": "instrument",
@@ -217,6 +223,85 @@ class AtwDatabase:
                 )
         return (1, len(yearly_rows))
 
+    def save_intraday(self, snapshots: Iterable[dict], ticker: str = "ATW") -> int:
+        """Upsert intraday snapshots. Keyed on snapshot_ts; duplicates ignored."""
+        if snapshots is None:
+            return 0
+        if isinstance(snapshots, pd.DataFrame):
+            records = snapshots.where(pd.notnull(snapshots), None).to_dict(orient="records")
+        else:
+            records = [dict(s) for s in snapshots]
+        if not records:
+            return 0
+
+        clean: list[dict] = []
+        for r in records:
+            ts = r.get("snapshot_ts") or r.get("timestamp")
+            if not ts:
+                continue
+            row = {k: None for k in INTRADAY_COLUMNS}
+            row["snapshot_ts"] = ts
+            row["cotation_ts"] = r.get("cotation_ts") or r.get("cotation")
+            row["ticker"] = r.get("ticker") or ticker
+            row["market_status"] = r.get("market_status")
+            for k in (
+                "last_price", "open", "high", "low", "prev_close", "variation_pct",
+                "shares_traded", "value_traded_mad", "num_trades", "market_cap",
+            ):
+                row[k] = r.get(k)
+            clean.append(row)
+        if not clean:
+            return 0
+
+        engine = self._require()
+        with engine.begin() as conn:
+            before = conn.execute(text("SELECT COUNT(*) FROM bourse_intraday")).scalar() or 0
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO bourse_intraday (
+                        snapshot_ts, cotation_ts, ticker, market_status, last_price,
+                        open, high, low, prev_close, variation_pct,
+                        shares_traded, value_traded_mad, num_trades, market_cap
+                    ) VALUES (
+                        :snapshot_ts, :cotation_ts, :ticker, :market_status, :last_price,
+                        :open, :high, :low, :prev_close, :variation_pct,
+                        :shares_traded, :value_traded_mad, :num_trades, :market_cap
+                    )
+                    ON CONFLICT (snapshot_ts) DO NOTHING
+                    """
+                ),
+                clean,
+            )
+            after = conn.execute(text("SELECT COUNT(*) FROM bourse_intraday")).scalar() or 0
+        return after - before
+
+    def save_technicals(self, doc: dict, symbol: str = "ATW",
+                        computed_at: str | datetime | None = None) -> int:
+        """Append a technicals computation as JSONB. Returns 1 if inserted, 0 if duplicate."""
+        if not doc:
+            return 0
+        ts = computed_at or datetime.utcnow().isoformat()
+        as_of = doc.get("as_of_date")
+        engine = self._require()
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    INSERT INTO technicals_snapshot (symbol, computed_at, as_of_date, payload)
+                    VALUES (:symbol, :ts, :as_of, CAST(:payload AS JSONB))
+                    ON CONFLICT (symbol, computed_at) DO NOTHING
+                    """
+                ),
+                {
+                    "symbol": symbol,
+                    "ts": ts,
+                    "as_of": as_of,
+                    "payload": json.dumps(doc, default=str),
+                },
+            )
+        return result.rowcount or 0
+
     # ---------- RETRIEVE ----------
     def get_bourse(self, start: date | None = None, end: date | None = None) -> pd.DataFrame:
         engine = self._require()
@@ -281,4 +366,54 @@ class AtwDatabase:
             ),
             engine,
             params={"s": symbol},
+        )
+
+    def get_intraday(self, ticker: str = "ATW",
+                     start: datetime | None = None,
+                     end: datetime | None = None,
+                     limit: int | None = None) -> pd.DataFrame:
+        engine = self._require()
+        clauses = ["ticker = :ticker"]
+        params: dict[str, Any] = {"ticker": ticker}
+        if start:
+            clauses.append("snapshot_ts >= :start"); params["start"] = start
+        if end:
+            clauses.append("snapshot_ts <= :end"); params["end"] = end
+        q = "SELECT * FROM bourse_intraday WHERE " + " AND ".join(clauses)
+        q += " ORDER BY snapshot_ts DESC"
+        if limit:
+            q += " LIMIT :limit"; params["limit"] = limit
+        return pd.read_sql(text(q), engine, params=params)
+
+    def get_technicals_latest(self, symbol: str = "ATW") -> dict:
+        engine = self._require()
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT payload FROM technicals_snapshot
+                    WHERE symbol = :s
+                    ORDER BY computed_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"s": symbol},
+            ).fetchone()
+        return dict(row[0]) if row else {}
+
+    def get_technicals_history(self, symbol: str = "ATW",
+                               limit: int = 50) -> pd.DataFrame:
+        engine = self._require()
+        return pd.read_sql(
+            text(
+                """
+                SELECT id, symbol, computed_at, as_of_date, payload
+                FROM technicals_snapshot
+                WHERE symbol = :s
+                ORDER BY computed_at DESC
+                LIMIT :limit
+                """
+            ),
+            engine,
+            params={"s": symbol, "limit": limit},
         )

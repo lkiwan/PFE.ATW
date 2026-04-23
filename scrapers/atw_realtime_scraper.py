@@ -369,6 +369,26 @@ def _save_state(state: Dict[str, Any]) -> None:
     os.replace(tmp, STATE_FILE)
 
 
+def _persist_snapshot_to_db(snap: "Snapshot", technicals: Optional[Dict[str, Any]]) -> None:
+    """Push latest snapshot + technicals to Postgres. Non-fatal on failure."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from database import AtwDatabase
+        with AtwDatabase() as db:
+            row = asdict(snap)
+            row["snapshot_ts"] = row.pop("timestamp", None)
+            row["cotation_ts"] = row.pop("cotation", None)
+            row["ticker"] = TICKER
+            n = db.save_intraday([row])
+            logger.info("DB: %d intraday row(s) inserted.", n)
+            if technicals:
+                t = db.save_technicals(technicals, symbol=TICKER)
+                logger.info("DB: %d technicals snapshot inserted.", t)
+    except Exception as e:
+        logger.warning("DB persist skipped: %s", e)
+
+
 # --- CSV writers -------------------------------------------------------------
 
 def _append_row(path: Path, fields: List[str], row: Dict[str, Any]) -> None:
@@ -442,6 +462,13 @@ def _merge_technicals_into_state(
     state["technicals"] = technicals
 
 
+def _push_snapshot_history(state: Dict[str, Any], snap: "Snapshot") -> None:
+    """Prepend this snapshot to snapshot_history so newest entries appear first."""
+    history = state.get("snapshot_history", [])
+    history.insert(0, asdict(snap))
+    state["snapshot_history"] = history
+
+
 # --- Subcommands -------------------------------------------------------------
 
 def cmd_snapshot(args) -> int:
@@ -496,6 +523,7 @@ def cmd_snapshot(args) -> int:
                           "num_trades", "market_cap"):
                     state[f"last_snapshot_{k}"] = getattr(cached, k)
 
+                technicals = None
                 if args.force or cached.market_status == "OPEN":
                     technicals = compute_technicals(TICKER)
                     _merge_technicals_into_state(state, technicals)
@@ -503,7 +531,9 @@ def cmd_snapshot(args) -> int:
                 else:
                     logger.info("Market closed — skipping technical merge for %s", day)
 
+                _push_snapshot_history(state, cached)
                 _save_state(state)
+                _persist_snapshot_to_db(cached, technicals)
                 _auto_finalize_if_needed(now_casa)
                 return 0
         except ValueError:
@@ -540,6 +570,7 @@ def cmd_snapshot(args) -> int:
               "num_trades", "market_cap"):
         state[f"last_snapshot_{k}"] = getattr(snap, k)
 
+    technicals = None
     if args.force or snap.market_status == "OPEN":
         technicals = compute_technicals(TICKER)
         _merge_technicals_into_state(state, technicals)
@@ -547,7 +578,9 @@ def cmd_snapshot(args) -> int:
     else:
         logger.info("Market closed — skipping technical merge for %s", day)
 
+    _push_snapshot_history(state, snap)
     _save_state(state)
+    _persist_snapshot_to_db(snap, technicals)
     _auto_finalize_if_needed(now_casa)
     return 0
 
