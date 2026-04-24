@@ -53,7 +53,7 @@ class NewsItem(BaseModel):
     bucket: Literal["HIGH", "MEDIUM", "CONTEXT", "NOISE"] = Field(
         description="HIGH >=75, MEDIUM 60-74, CONTEXT 30-59, NOISE <30."
     )
-
+9
 
 class NewsBrief(BaseModel):
     as_of_date: str

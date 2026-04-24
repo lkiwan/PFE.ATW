@@ -1,4 +1,5 @@
 # 🐋 WHALE PLAN — ATW Agent Intelligence Suite
+
 > **Project**: PFE.01 · Attijariwafa Bank (ATW) AI Agents  
 > **Date**: 2026-04-23  
 > **Status**: v1.0 — Production-Ready Blueprint
@@ -67,49 +68,49 @@ anything; the whole picture does.
 
 ### 2.1 `agent_analyse` — The Quant
 
-| Property | Value |
-|---|---|
-| **File** | `agents/agent_analyse.py` |
-| **Model** | Claude Sonnet (claude-sonnet-4-20250514) |
-| **Persona** | ATW-QUANT — Senior Quantitative Equity Analyst |
-| **Data source** | PostgreSQL (all 5 tables) |
-| **Output** | Structured Markdown report + JSON |
-| **Trigger** | After market close (15:45 WAT) or on demand |
+| Property        | Value                                          |
+| --------------- | ---------------------------------------------- |
+| **File**        | `agents/agent_analyse.py`                      |
+| **Model**       | Claude Sonnet (claude-sonnet-4-20250514)       |
+| **Persona**     | ATW-QUANT — Senior Quantitative Equity Analyst |
+| **Data source** | PostgreSQL (all 5 tables)                      |
+| **Output**      | Structured Markdown report + JSON              |
+| **Trigger**     | After market close (15:45 WAT) or on demand    |
 
 **Analytics layers it covers:**
 
-| Layer | Indicators |
-|---|---|
-| **Technical** | SMA-20/50, EMA-20, RSI-14, MACD(12,26,9), Bollinger Bands(20,2), ATR-14, Momentum Score |
-| **Fundamental** | P/E, P/B, Dividend Yield, ROE, EPS trend, Book Value/share |
-| **Macro** | Inflation, EUR/MAD + USD/MAD, Brent, Gold, VIX, MASI, US10Y, BAM monetary cycle |
-| **Sentiment** | Avg signal score, core article ratio, top-5 headlines |
-| **Synthesis** | BUY / HOLD / SELL signal + price target range + 3 risks + 3 catalysts |
+| Layer           | Indicators                                                                              |
+| --------------- | --------------------------------------------------------------------------------------- |
+| **Technical**   | SMA-20/50, EMA-20, RSI-14, MACD(12,26,9), Bollinger Bands(20,2), ATR-14, Momentum Score |
+| **Fundamental** | P/E, P/B, Dividend Yield, ROE, EPS trend, Book Value/share                              |
+| **Macro**       | Inflation, EUR/MAD + USD/MAD, Brent, Gold, VIX, MASI, US10Y, BAM monetary cycle         |
+| **Sentiment**   | Avg signal score, core article ratio, top-5 headlines                                   |
+| **Synthesis**   | BUY / HOLD / SELL signal + price target range + 3 risks + 3 catalysts                   |
 
 ---
 
 ### 2.2 `agent_news` — The Journalist
 
-| Property | Value |
-|---|---|
-| **File** | `agents/agent_news.py` |
-| **Model** | Claude Sonnet (claude-sonnet-4-20250514) |
-| **Persona** | ATW-NEWS — Financial News Intelligence Officer |
+| Property        | Value                                                  |
+| --------------- | ------------------------------------------------------ |
+| **File**        | `agents/agent_news.py`                                 |
+| **Model**       | Claude Sonnet (claude-sonnet-4-20250514)               |
+| **Persona**     | ATW-NEWS — Financial News Intelligence Officer         |
 | **Data source** | agno GoogleSearchTools (live web) + PostgreSQL (dedup) |
-| **Output** | Intelligence Brief (Markdown) + saves to DB |
-| **Trigger** | Every 4–6 hours (intraday sweeps) |
+| **Output**      | Intelligence Brief (Markdown) + saves to DB            |
+| **Trigger**     | Every 4–6 hours (intraday sweeps)                      |
 
 **Search coverage:**
 
-| Query Category | What It Hunts |
-|---|---|
-| Earnings | Net income, PNB, quarterly/annual results |
-| Dividends | DPS announcements, ex-dividend dates |
-| Analyst Notes | Price targets, rating changes, broker reports |
-| Regulatory | BAM circulars, Basel III/IV updates, capital ratios |
-| M&A | Acquisitions, partnerships, subsidiary news |
-| Macro Impact | Dirham moves, inflation, BAM rate decisions |
-| Africa Operations | CBAO, Wafa Assurance, sub-Saharan expansion |
+| Query Category    | What It Hunts                                       |
+| ----------------- | --------------------------------------------------- |
+| Earnings          | Net income, PNB, quarterly/annual results           |
+| Dividends         | DPS announcements, ex-dividend dates                |
+| Analyst Notes     | Price targets, rating changes, broker reports       |
+| Regulatory        | BAM circulars, Basel III/IV updates, capital ratios |
+| M&A               | Acquisitions, partnerships, subsidiary news         |
+| Macro Impact      | Dirham moves, inflation, BAM rate decisions         |
+| Africa Operations | CBAO, Wafa Assurance, sub-Saharan expansion         |
 
 **Scoring system:**
 
@@ -129,6 +130,7 @@ signal_score = 0.5 (base)
 ## 3. Data Flow: Step by Step
 
 ### Morning Run (08:00 WAT)
+
 ```
 1. agent_news runs
    ├─ checks DB for last 10 headlines (dedup baseline)
@@ -142,6 +144,7 @@ signal_score = 0.5 (base)
 ```
 
 ### Post-Close Run (16:00 WAT — after Casablanca close at 15:30)
+
 ```
 1. Scrapers run first (existing pipeline):
    ├─ atw_realtime_scraper.py     → bourse_daily updated
@@ -197,6 +200,7 @@ GOOGLE_CSE_ID=...                     # Custom Search Engine ID
 ### 4.3 Update `requirements.txt`
 
 Add to the existing file:
+
 ```
 agno>=1.0.0
 anthropic>=0.40.0
@@ -207,6 +211,7 @@ anthropic>=0.40.0
 ## 5. Running the Agents
 
 ### Run `agent_news` (live news sweep)
+
 ```bash
 # Default: search → classify → save to DB → produce brief
 python agents/agent_news.py
@@ -219,6 +224,7 @@ python agents/agent_news.py --no-db
 ```
 
 ### Run `agent_analyse` (full market analytics)
+
 ```bash
 # Default: full report on ATW
 python agents/agent_analyse.py
@@ -231,6 +237,7 @@ python agents/agent_analyse.py --save data/analysis_report.json
 ```
 
 ### Run both in sequence (recommended daily workflow)
+
 ```bash
 # 1. Refresh news first
 python agents/agent_news.py
@@ -259,6 +266,7 @@ Add to crontab (`crontab -e`):
 ## 7. Output Examples
 
 ### `agent_news` Intelligence Brief
+
 ```
 ═══════════════════════════════════════════════════════════════════
 📰 ATW NEWS INTELLIGENCE BRIEF — 2026-04-23
@@ -286,6 +294,7 @@ Add to crontab (`crontab -e`):
 ```
 
 ### `agent_analyse` Analytics Report
+
 ```
 ═══════════════════════════════════════════════════════════════════
 ATW-QUANT MARKET ANALYTICS REPORT — 2026-04-23
@@ -335,6 +344,7 @@ ATW-QUANT MARKET ANALYTICS REPORT — 2026-04-23
 ## 8. Extending the Agents
 
 ### Add a new analytics tool to `agent_analyse`
+
 ```python
 # In agents/agent_analyse.py
 
@@ -348,6 +358,7 @@ tools=[..., get_peer_comparison]
 ```
 
 ### Add a new news source to `agent_news`
+
 ```python
 # In ATW_SEARCH_QUERIES dict:
 ATW_SEARCH_QUERIES["investor_relations"] = \
@@ -355,6 +366,7 @@ ATW_SEARCH_QUERIES["investor_relations"] = \
 ```
 
 ### Swap to a different LLM
+
 ```python
 # In either agent file, replace:
 model=Claude(id="claude-sonnet-4-20250514")
@@ -395,15 +407,15 @@ project_root/
 
 ## 10. Key Design Decisions
 
-| Decision | Rationale |
-|---|---|
-| **Separate agents** (not one monolith) | Each agent has a single responsibility → easier to debug, schedule, and extend independently |
-| **agent_news runs first** | Ensures DB has fresh news before agent_analyse computes sentiment |
-| **agno GoogleSearch over scraper** | Scrapers cover specific known sites; Google catches any source that mentions ATW including international press |
-| **Signal scoring in Python (not LLM)** | Fast, deterministic, cheap — LLM is used for synthesis not tagging |
-| **PostgreSQL as shared state** | Both agents read/write the same DB → no inter-agent messaging bus needed at this scale |
-| **Claude Sonnet not Opus** | Balanced cost/performance for daily automation; Opus reserved for deep research questions |
+| Decision                               | Rationale                                                                                                      |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **Separate agents** (not one monolith) | Each agent has a single responsibility → easier to debug, schedule, and extend independently                   |
+| **agent_news runs first**              | Ensures DB has fresh news before agent_analyse computes sentiment                                              |
+| **agno GoogleSearch over scraper**     | Scrapers cover specific known sites; Google catches any source that mentions ATW including international press |
+| **Signal scoring in Python (not LLM)** | Fast, deterministic, cheap — LLM is used for synthesis not tagging                                             |
+| **PostgreSQL as shared state**         | Both agents read/write the same DB → no inter-agent messaging bus needed at this scale                         |
+| **Claude Sonnet not Opus**             | Balanced cost/performance for daily automation; Opus reserved for deep research questions                      |
 
 ---
 
-*Whale Plan v1.0 — Built for PFE.01 · Attijariwafa Bank Intelligence Suite*
+_Whale Plan v1.0 — Built for PFE.01 · Attijariwafa Bank Intelligence Suite_

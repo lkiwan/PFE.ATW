@@ -239,11 +239,30 @@ class OrderBook:
 
 # --- Fetchers: Medias24 (live intraday) -------------------------------------
 
+def _medias24_token(session: requests.Session) -> Optional[str]:
+    cached = getattr(session, "_medias24_token", None)
+    if cached:
+        return cached
+    try:
+        r = session.get(MEDIAS24_REFERER, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        import re
+        m = re.search(r"token=([0-9a-f-]{36})", r.text)
+        token = m.group(1) if m else None
+    except requests.RequestException:
+        token = None
+    session._medias24_token = token
+    return token
+
+
 def _medias24_api_get(session: requests.Session, method: str, **params) -> Any:
     params["method"] = method
     params.setdefault("ISIN", ATW_ISIN)
     params.setdefault("format", "json")
     params.setdefault("t", int(time.time() * 1000))
+    token = _medias24_token(session)
+    if token:
+        params.setdefault("token", token)
     r = session.get(MEDIAS24_API_ROOT, params=params, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     payload = r.json()
@@ -253,7 +272,10 @@ def _medias24_api_get(session: requests.Session, method: str, **params) -> Any:
 
 
 def fetch_stock_info(session: requests.Session) -> Dict[str, Any]:
-    return _medias24_api_get(session, "getStockInfo")
+    res = _medias24_api_get(session, "getStockInfo")
+    if isinstance(res, list):
+        res = next((x for x in res if isinstance(x, dict)), {})
+    return res if isinstance(res, dict) else {}
 
 
 def fetch_transactions(session: requests.Session) -> List[Dict[str, Any]]:
