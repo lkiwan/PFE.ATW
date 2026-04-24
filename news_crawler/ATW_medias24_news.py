@@ -501,6 +501,7 @@ def filter_since(articles: list[dict], since_iso: Optional[str]) -> list[dict]:
 
 # --- State -------------------------------------------------------------------
 
+def empty_state() -> dict:
     return {
         "seen_urls": {},
         "per_source_last_seen": {},
