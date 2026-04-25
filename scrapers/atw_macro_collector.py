@@ -3,11 +3,25 @@ ATW macroeconomic and market-context collector.
 
 Builds a daily macro dataset for ATW (Attijariwafa Bank) by combining:
 - World Bank indicators (REST API)
-- IMF DataMapper indicators (REST API)
+- IMF DataMapper indicators (REST API, behind sanity bands — feed for MAR
+  has been returning corrupted values; series are auto-discarded if any
+  point lies outside SANITY_BANDS)
 - yfinance daily market series
+- investing.com (MASI index — yfinance has no working MASI ticker; "MASI"
+  there is Masimo Corp, a US medical-devices stock)
 
 Output:
     data/ATW_macro_morocco.csv
+     Sources used for verification:
+  - https://www.investing.com/indices/masi
+  - https://tradingeconomics.com/commodity/brent-crude-oil
+  - https://www.imf.org/en/news/articles/2025/03/18/pr-2568-morocco-imf-concludes-2025-art-iv-consult-3rd-review-under-rsf
+  - https://api.worldbank.org/v2/country/MA/indicator/NY.GDP.MKTP.KD.ZG
+
+
+
+
+  BRENT FREd TO FIX LATER
 """
 
 from __future__ import annotations
@@ -28,14 +42,18 @@ import certifi
 try:
     import yfinance as yf
 except ImportError as exc:
-    # ... handle missing dependency ...
     raise RuntimeError("Missing dependency: yfinance") from exc
+
+try:
+    import cloudscraper  # type: ignore
+    _HAS_CLOUDSCRAPER = True
+except ImportError:
+    _HAS_CLOUDSCRAPER = False
 
 logger = logging.getLogger("atw_macro_collector")
 
-# ... rest of constants ...
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = _ROOT / "data"
 DEFAULT_OUTPUT = DATA_DIR / "ATW_macro_morocco.csv"
 DEFAULT_START = "2010-01-01"
@@ -117,7 +135,32 @@ YF_CANDIDATES = {
     # bars; EEM retained as fallback in case IEMG data is unavailable.
     "em_close": ["IEMG", "EEM"],
     "us10y_yield": ["^TNX"],
-    "masi_close": ["MASI"],
+}
+
+
+# investing.com pair_id for MASI (Moroccan All Shares Index).
+# Discovered via the page's instrumentId field. yfinance has no working MASI
+# ticker — "MASI" there is Masimo Corp, a US medical-devices stock.
+INVESTING_MASI_PAIR_ID = 13228
+INVESTING_HISTORICAL_URL = (
+    "https://api.investing.com/api/financialdata/historical/{pair}"
+)
+
+
+# Sanity bands. A source whose values fall outside its band is discarded
+# before merging, and a final per-row validator drops rows where any populated
+# cell violates its band. Bands are intentionally wide.
+SANITY_BANDS: dict[str, tuple[float, float]] = {
+    "masi_close": (5_000, 50_000),
+    "inflation_cpi_pct": (-5, 25),
+    "public_debt_pct_gdp": (20, 150),
+    "gdp_growth_pct": (-25, 25),
+    "current_account_pct_gdp": (-25, 25),
+    "brent_usd": (5, 300),
+    "gold_usd": (200, 15_000),
+    "eur_mad": (5, 20),
+    "usd_mad": (5, 20),
+    "vix": (5, 100),
 }
 
 
@@ -201,7 +244,6 @@ def get_last_date(path: Path) -> pd.Timestamp | None:
     if not path.exists() or path.stat().st_size == 0:
         return None
     try:
-        # Read only the last few rows to find a date
         df = pd.read_csv(path, usecols=["date"]).tail(5)
         if df.empty:
             return None
@@ -244,6 +286,50 @@ def fetch_yf_close(
         close = df["Close"]
     close.index = pd.to_datetime(close.index, errors="coerce").tz_localize(None)
     return _to_datetime_index(close)
+
+
+def fetch_masi_history(start_date: str | None = None) -> pd.Series:
+    """Fetch MASI daily closes from investing.com (pair 13228).
+
+    investing.com sits behind Cloudflare and rejects plain `requests`; we
+    route the call through cloudscraper, which is already a hard dependency
+    of `atw_realtime_scraper.py` so should always be available.
+    """
+    if not _HAS_CLOUDSCRAPER:
+        raise RuntimeError("cloudscraper is required for MASI fetch: pip install cloudscraper")
+    end = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    start = start_date or "2010-01-01"
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    )
+    scraper.headers.update({
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.investing.com/indices/masi-historical-data",
+        "domain-id": "www",
+    })
+    params = {
+        "start-date": start,
+        "end-date": end,
+        "time-frame": "Daily",
+        "add-missing-rows": "false",
+    }
+    url = INVESTING_HISTORICAL_URL.format(pair=INVESTING_MASI_PAIR_ID)
+    resp = scraper.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+    rows = payload.get("data", [])
+    values: dict[pd.Timestamp, float] = {}
+    for row in rows:
+        ts = row.get("rowDateTimestamp") or row.get("rowDateRaw")
+        close = row.get("last_closeRaw")
+        if ts is None or close is None:
+            continue
+        dt = pd.to_datetime(ts, errors="coerce", utc=True)
+        if pd.isna(dt):
+            continue
+        values[dt.tz_convert(None) if dt.tzinfo else dt] = float(close)
+    s = pd.Series(values, dtype=float)
+    return _to_datetime_index(s)
 
 
 def fetch_first_available_yf(candidates: list[str]) -> tuple[pd.Series, str | None]:
@@ -312,6 +398,15 @@ def collect_series(start_date: str | None = None) -> dict[str, pd.Series]:
             logger.warning("yfinance failed all candidates for %s", output_col)
             series_map[output_col] = pd.Series(dtype=float)
 
+    # MASI from investing.com (pair 13228) — yfinance has no working ticker.
+    try:
+        masi = fetch_masi_history(start_date=start_date)
+        logger.info("investing.com MASI(13228) -> masi_close (%d pts)", len(masi))
+        series_map["masi_close"] = masi
+    except (requests.RequestException, ValueError, OSError) as exc:
+        logger.warning("investing.com MASI failed: %s", exc)
+        series_map["masi_close"] = pd.Series(dtype=float)
+
     return series_map
 
 
@@ -319,9 +414,28 @@ def _to_daily_ffill(series: pd.Series, full_index: pd.DatetimeIndex) -> pd.Serie
     s = _to_datetime_index(series)
     if s.empty:
         return pd.Series(index=full_index, dtype=float)
-    s_daily = s.resample("D").ffill()
-    s_daily = s_daily.reindex(full_index).ffill()
-    return s_daily
+    # Reindex onto the union, ffill across that, then take the requested window.
+    # An earlier resample("D").ffill() variant silently dropped annual WB data
+    # when the original index had only year-end timestamps and the requested
+    # window was a 30-day incremental slice that didn't overlap.
+    union = full_index.union(s.index).sort_values()
+    s_filled = s.reindex(union).ffill()
+    return s_filled.reindex(full_index)
+
+
+def _passes_sanity(series: pd.Series, band: tuple[float, float]) -> bool:
+    """True iff every non-null value in the series lies inside the band.
+
+    We check every point, not just the last, because IMF DataMapper Morocco
+    forecasts extend to ~2031 with far-future values that can fall back inside
+    plausible bands while near-term values are corrupted (e.g. 2024 debt =
+    261.2). A single out-of-band point disqualifies the source.
+    """
+    s = series.dropna()
+    if s.empty:
+        return True
+    lo, hi = band
+    return bool(((s >= lo) & (s <= hi)).all())
 
 
 def _prune_sparse_columns(
@@ -378,16 +492,36 @@ def build_daily_frame(
     for col in direct_cols:
         df[col] = _to_daily_ffill(series_map.get(col, pd.Series(dtype=float)), full_index)
 
-    # Inflation precedence: World Bank -> IMF
-    infl_wb = _to_daily_ffill(series_map.get("inflation_cpi_pct_wb", pd.Series(dtype=float)), full_index)
-    infl_imf = _to_daily_ffill(series_map.get("inflation_cpi_pct_imf", pd.Series(dtype=float)), full_index)
+    # Inflation precedence: World Bank -> IMF. Reject either source whose
+    # values fall outside the sanity band — IMF DataMapper has been returning
+    # corrupted values for MAR (~100% inflation), so this guard kicks in.
+    infl_band = SANITY_BANDS["inflation_cpi_pct"]
+    infl_wb_raw = series_map.get("inflation_cpi_pct_wb", pd.Series(dtype=float))
+    infl_imf_raw = series_map.get("inflation_cpi_pct_imf", pd.Series(dtype=float))
+    if not _passes_sanity(infl_wb_raw, infl_band):
+        logger.warning("inflation WB out of band; discarding source")
+        infl_wb_raw = pd.Series(dtype=float)
+    if not _passes_sanity(infl_imf_raw, infl_band):
+        logger.warning("inflation IMF out of band; discarding source")
+        infl_imf_raw = pd.Series(dtype=float)
+    infl_wb = _to_daily_ffill(infl_wb_raw, full_index)
+    infl_imf = _to_daily_ffill(infl_imf_raw, full_index)
     df["inflation_cpi_pct"] = infl_wb.combine_first(infl_imf)
 
-    # Public debt precedence: IMF general government gross debt -> WB central gov't debt.
-    # IMF GGXWDG_NGDP is the correct indicator (~67-70% for Morocco); WB GC.DOD.TOTL.GD.ZS
-    # covers central government only and underestimates by ~15-20 pp.
-    debt_imf = _to_daily_ffill(series_map.get("public_debt_pct_gdp_imf", pd.Series(dtype=float)), full_index)
-    debt_wb = _to_daily_ffill(series_map.get("public_debt_pct_gdp_wb", pd.Series(dtype=float)), full_index)
+    # Public debt precedence: IMF general government gross debt -> WB central
+    # gov't debt. IMF GGXWDG_NGDP is the correct indicator (~67-70% for Morocco)
+    # but the feed has been returning ~262% for 2024 — sanity guard catches it.
+    debt_band = SANITY_BANDS["public_debt_pct_gdp"]
+    debt_imf_raw = series_map.get("public_debt_pct_gdp_imf", pd.Series(dtype=float))
+    debt_wb_raw = series_map.get("public_debt_pct_gdp_wb", pd.Series(dtype=float))
+    if not _passes_sanity(debt_imf_raw, debt_band):
+        logger.warning("public debt IMF out of band; discarding source")
+        debt_imf_raw = pd.Series(dtype=float)
+    if not _passes_sanity(debt_wb_raw, debt_band):
+        logger.warning("public debt WB out of band; discarding source")
+        debt_wb_raw = pd.Series(dtype=float)
+    debt_imf = _to_daily_ffill(debt_imf_raw, full_index)
+    debt_wb = _to_daily_ffill(debt_wb_raw, full_index)
     df["public_debt_pct_gdp"] = debt_imf.combine_first(debt_wb)
 
     # Required metadata + derived features
@@ -409,9 +543,8 @@ def build_daily_frame(
     out = df.reset_index().rename(columns={"index": "date"})
     out["date"] = out["date"].dt.date.astype(str)
 
-    # --- Data Cleaning (per USER request): Remove rows with missing core daily data ---
-    # We drop rows where crucial Yahoo Finance columns are NaN to remove sparse historical rows.
-    # This ensures the dataset effectively starts from ~2016-04-20 when daily tracking begins.
+    # Drop rows where every core daily indicator is NaN — these are pre-2016
+    # placeholders before yfinance + investing.com coverage starts.
     clean_subset = ["eur_mad", "usd_mad", "masi_close", "vix"]
     existing_subset = [c for c in clean_subset if c in out.columns]
     if existing_subset:
@@ -431,6 +564,35 @@ def build_daily_frame(
     return out
 
 
+def validate_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop any row that violates a sanity band on a populated cell.
+
+    Empty cells are allowed (the column simply hasn't been backfilled yet);
+    only present-but-implausible values are rejected. Returns the cleaned
+    frame and logs how many rows were dropped per column.
+    """
+    if df.empty:
+        return df
+    bad_mask = pd.Series(False, index=df.index)
+    drops_by_col: dict[str, int] = {}
+    for col, (lo, hi) in SANITY_BANDS.items():
+        if col not in df.columns:
+            continue
+        col_vals = pd.to_numeric(df[col], errors="coerce")
+        col_bad = col_vals.notna() & ((col_vals < lo) | (col_vals > hi))
+        n = int(col_bad.sum())
+        if n:
+            drops_by_col[col] = n
+            bad_mask = bad_mask | col_bad
+    if drops_by_col:
+        logger.warning(
+            "Sanity validation rejecting %d rows across columns: %s",
+            int(bad_mask.sum()),
+            drops_by_col,
+        )
+    return df.loc[~bad_mask].copy()
+
+
 def write_output(df: pd.DataFrame, out_path: Path, full_refresh: bool) -> pd.DataFrame:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     target_columns = list(df.columns)
@@ -448,7 +610,7 @@ def write_output(df: pd.DataFrame, out_path: Path, full_refresh: bool) -> pd.Dat
         except Exception as exc:
             logger.warning("Could not read existing file: %s. Starting fresh.", exc)
             combined = df.copy()
-        
+
         if "date" in combined.columns:
             combined["date"] = pd.to_datetime(combined["date"], errors="coerce")
             combined = combined.dropna(subset=["date"])
@@ -498,19 +660,18 @@ def main() -> int:
     if not 0.0 <= args.max_missing_ratio <= 1.0:
         raise ValueError("--max-missing-ratio must be between 0.0 and 1.0")
 
-    # Determine window for collection
     start_date = args.start_date
     is_incremental = False
 
     if not args.full_refresh:
         last_date = get_last_date(args.out)
         if last_date:
-            # Lookback 30 days to ensure windowed indicators (fx_pressure, momentum) are correct
+            # Lookback 30 days so windowed indicators (fx_pressure, momentum) recompute correctly.
             lookback = last_date - timedelta(days=30)
             start_date = lookback.strftime("%Y-%m-%d")
             is_incremental = True
             logger.info("Incremental update: resuming from %s (lookback to %s)", last_date.date(), start_date)
-    
+
     if not is_incremental:
         logger.info("Full refresh/Initial run: scraping from %s", start_date)
 
@@ -525,6 +686,9 @@ def main() -> int:
         max_missing_ratio=args.max_missing_ratio,
     )
 
+    logger.info("Running per-row sanity validation...")
+    daily_df = validate_frame(daily_df)
+
     logger.info("Writing output to %s", args.out)
     final_df = write_output(daily_df, args.out, full_refresh=args.full_refresh)
 
@@ -532,7 +696,7 @@ def main() -> int:
 
     try:
         import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        sys.path.insert(0, str(_ROOT))
         from database import AtwDatabase
         with AtwDatabase() as db:
             n = db.save_macro(final_df)
