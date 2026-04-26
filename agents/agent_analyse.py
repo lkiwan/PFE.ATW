@@ -572,6 +572,69 @@ def compute_investment_prediction(
 
 
 # =============================================================================
+# STRATEGY FILTERS — context-aware vetoes informed by backtest loss analysis
+# =============================================================================
+#
+# Tunable thresholds. Calibrated from backtest breakdown buckets where
+# loss_rate >> baseline. See agents/analyze_losses.py.
+FILTER_BEAR_3M_THRESHOLD = -5.0
+FILTER_TOP_1M_THRESHOLD = 8.0
+FILTER_TOP_NEAR_HIGH_PCT = 3.0
+FILTER_COOLDOWN_RECENT_STOPS = 2
+FILTER_COOLDOWN_BARS = 5
+
+
+def filter_bear_regime(snap: MarketSnapshot) -> str | None:
+    r3m = snap.return_3m_pct
+    if r3m is not None and r3m < FILTER_BEAR_3M_THRESHOLD:
+        return f"BEAR_REGIME (return_3m_pct={r3m:.2f}%)"
+    return None
+
+
+def filter_top_buying(snap: MarketSnapshot) -> str | None:
+    r1m = snap.return_1m_pct
+    if r1m is None or snap.high_52w <= 0 or snap.last_close <= 0:
+        return None
+    pct_below_high = (snap.high_52w - snap.last_close) / snap.high_52w * 100
+    if r1m > FILTER_TOP_1M_THRESHOLD and pct_below_high < FILTER_TOP_NEAR_HIGH_PCT:
+        return f"TOP_BUYING (return_1m_pct={r1m:.2f}%, %below52w={pct_below_high:.2f}%)"
+    return None
+
+
+def filter_cooldown(recent_outcomes: list[str] | None) -> str | None:
+    """Pause when the last N resolved signals were all stops."""
+    if not recent_outcomes:
+        return None
+    last_n = recent_outcomes[-FILTER_COOLDOWN_RECENT_STOPS:]
+    if len(last_n) < FILTER_COOLDOWN_RECENT_STOPS:
+        return None
+    if all(o == "STOP" for o in last_n):
+        return f"COOLDOWN (last {FILTER_COOLDOWN_RECENT_STOPS} signals stopped)"
+    return None
+
+
+def apply_strategy_filters(
+    snap: MarketSnapshot,
+    recent_outcomes: list[str] | None = None,
+    enabled: tuple[str, ...] = ("bear", "top", "cooldown"),
+) -> str | None:
+    """First-hit-wins filter chain. Returns a skip reason or None."""
+    if "bear" in enabled:
+        r = filter_bear_regime(snap)
+        if r:
+            return r
+    if "top" in enabled:
+        r = filter_top_buying(snap)
+        if r:
+            return r
+    if "cooldown" in enabled:
+        r = filter_cooldown(recent_outcomes)
+        if r:
+            return r
+    return None
+
+
+# =============================================================================
 # EVIDENCE BLOCK — assemble all loaders into one prompt with stable IDs
 # =============================================================================
 
@@ -828,6 +891,50 @@ def print_analysis(a: ATWAnalysis) -> None:
 
 
 # =============================================================================
+# HISTORY — append-only prediction log for performance tracking
+# =============================================================================
+
+HISTORY_CSV = DATA_DIR / "prediction_history.csv"
+
+
+def save_prediction_history(analysis: ATWAnalysis, path: Path = HISTORY_CSV) -> None:
+    """Append the latest analysis to a CSV history for performance tracking."""
+    t = analysis.trading_prediction
+    i = analysis.investment_prediction
+    new_row = {
+        "run_timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "as_of_date": analysis.as_of_date,
+        "last_close_mad": analysis.last_close_mad,
+        "fair_value_low_mad": analysis.fair_value_low_mad,
+        "fair_value_high_mad": analysis.fair_value_high_mad,
+        "upside_pct": analysis.upside_pct,
+        "verdict": analysis.verdict,
+        "conviction": analysis.conviction,
+        "trading_horizon_weeks": t.horizon_weeks,
+        "trading_entry_low_mad": t.entry_zone_low_mad,
+        "trading_entry_high_mad": t.entry_zone_high_mad,
+        "trading_target_mad": t.target_price_mad,
+        "trading_stop_loss_mad": t.stop_loss_mad,
+        "trading_expected_return_pct": t.expected_return_pct,
+        "trading_risk_reward_ratio": t.risk_reward_ratio,
+        "trading_atr_mad": t.atr_mad,
+        "trading_confidence": t.confidence,
+        "investment_horizon_months": i.horizon_months,
+        "investment_target_mad": i.target_price_mad,
+        "investment_target_low_mad": i.target_price_low_mad,
+        "investment_target_high_mad": i.target_price_high_mad,
+        "investment_upside_pct": i.upside_pct,
+        "investment_dividend_yield_pct": i.dividend_yield_pct,
+        "investment_total_return_pct": i.expected_total_return_pct,
+        "investment_recommendation": i.recommendation,
+        "investment_confidence": i.confidence,
+    }
+    df_new = pd.DataFrame([new_row])
+    write_header = not path.exists()
+    df_new.to_csv(path, mode="a", header=write_header, index=False, encoding="utf-8")
+
+
+# =============================================================================
 # CLI / MAIN — thin orchestrator, no business logic
 # =============================================================================
 
@@ -842,6 +949,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Print raw ATWAnalysis JSON instead of the formatted report.")
     p.add_argument("--evidence-only", action="store_true",
                    help="Print the assembled evidence block and exit (no LLM call).")
+    p.add_argument("--no-history", action="store_true",
+                   help="Skip appending the result to prediction_history.csv.")
     return p.parse_args()
 
 
@@ -904,6 +1013,10 @@ def main() -> int:
     analysis.investment_prediction = investment_pred.model_copy(
         update={"thesis": analysis.investment_prediction.thesis}
     )
+
+    if not args.no_history:
+        save_prediction_history(analysis)
+        print(f"[history] appended to {HISTORY_CSV}", flush=True)
 
     if args.raw:
         print(analysis.model_dump_json(indent=2))

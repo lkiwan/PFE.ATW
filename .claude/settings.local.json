@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile agents/agent_backtest.py)",
+      "Bash(python *)"
+    ]
+  }
+}
