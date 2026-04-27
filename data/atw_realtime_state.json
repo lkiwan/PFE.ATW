@@ -1,24 +1,115 @@
 {
-  "last_snapshot_ts": "2026-04-25T16:24:13+01:00",
-  "last_snapshot_cotation": "2026-04-24T15:36+01:00",
-  "last_snapshot_last_price": 689.0,
-  "last_snapshot_open": 689.0,
-  "last_snapshot_high": 710.0,
-  "last_snapshot_low": 689.0,
-  "last_snapshot_prev_close": 710.0,
-  "last_snapshot_variation_pct": -2.96,
-  "last_snapshot_shares_traded": 83847,
-  "last_snapshot_value_traded_mad": 57770583.0,
-  "last_snapshot_num_trades": 199,
-  "last_snapshot_market_cap": 148232038071.0,
+  "last_snapshot_ts": "2026-04-27T18:27:35+01:00",
+  "last_snapshot_cotation": "2026-04-27T15:09+01:00",
+  "last_snapshot_last_price": 699.9,
+  "last_snapshot_open": 697.0,
+  "last_snapshot_high": 705.0,
+  "last_snapshot_low": 691.1,
+  "last_snapshot_prev_close": 689.0,
+  "last_snapshot_variation_pct": 1.58,
+  "last_snapshot_shares_traded": 10776,
+  "last_snapshot_value_traded_mad": 7542122.0,
+  "last_snapshot_num_trades": 102,
+  "last_snapshot_market_cap": 150577073216.1,
   "finalized_days": [
     "2026-04-20",
     "2026-04-21",
     "2026-04-22",
     "2026-04-23",
-    "2026-04-25"
+    "2026-04-25",
+    "2026-04-27"
   ],
   "snapshot_history": [
+    {
+      "timestamp": "2026-04-27T18:27:35+01:00",
+      "cotation": "2026-04-27T15:09+01:00",
+      "market_status": "CLOSED",
+      "last_price": 699.9,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.58,
+      "shares_traded": 10776,
+      "value_traded_mad": 7542122.0,
+      "num_trades": 102,
+      "market_cap": 150577073216.1
+    },
+    {
+      "timestamp": "2026-04-27T15:36:06+01:00",
+      "cotation": "2026-04-27T15:09+01:00",
+      "market_status": "CLOSED",
+      "last_price": 699.9,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.58,
+      "shares_traded": 10776,
+      "value_traded_mad": 7542122.0,
+      "num_trades": 102,
+      "market_cap": 150577073216.1
+    },
+    {
+      "timestamp": "2026-04-27T15:28:41+01:00",
+      "cotation": "2026-04-27T15:09+01:00",
+      "market_status": "OPEN",
+      "last_price": 699.9,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.58,
+      "shares_traded": 10776,
+      "value_traded_mad": 7542122.0,
+      "num_trades": 102,
+      "market_cap": 150577073216.1
+    },
+    {
+      "timestamp": "2026-04-27T15:17:12+01:00",
+      "cotation": "2026-04-27T15:01+01:00",
+      "market_status": "OPEN",
+      "last_price": 700.0,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.6,
+      "shares_traded": 10682,
+      "value_traded_mad": 7477400.0,
+      "num_trades": 99,
+      "market_cap": 150598587300.0
+    },
+    {
+      "timestamp": "2026-04-27T14:56:34+01:00",
+      "cotation": "2026-04-27T14:36+01:00",
+      "market_status": "OPEN",
+      "last_price": 700.0,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.6,
+      "shares_traded": 10581,
+      "value_traded_mad": 7406700.0,
+      "num_trades": 97,
+      "market_cap": 150598587300.0
+    },
+    {
+      "timestamp": "2026-04-27T14:48:42+01:00",
+      "cotation": "2026-04-27T14:32+01:00",
+      "market_status": "OPEN",
+      "last_price": 700.0,
+      "open": 697.0,
+      "high": 705.0,
+      "low": 691.1,
+      "prev_close": 689.0,
+      "variation_pct": 1.6,
+      "shares_traded": 10170,
+      "value_traded_mad": 7119000.0,
+      "num_trades": 93,
+      "market_cap": 150598587300.0
+    },
     {
       "timestamp": "2026-04-25T16:24:13+01:00",
       "cotation": "2026-04-24T15:36+01:00",
@@ -276,73 +367,73 @@
     }
   ],
   "technicals": {
-    "as_of_date": "2026-04-23",
-    "last_close": 710.0,
+    "as_of_date": "2026-04-25",
+    "last_close": 689.0,
     "trend": "STRONG_DOWNTREND",
     "moving_averages": {
-      "SMA_20": 698.01,
-      "SMA_50": 710.23,
-      "SMA_200": 735.42,
-      "EMA_12": 706.2,
-      "EMA_26": 703.71,
+      "SMA_20": 698.46,
+      "SMA_50": 709.41,
+      "SMA_200": 735.41,
+      "EMA_12": 703.56,
+      "EMA_26": 702.62,
       "price_vs_SMA50": "BELOW",
       "price_vs_SMA200": "BELOW"
     },
     "RSI": {
-      "value": 53.21,
+      "value": 43.71,
       "signal": "NEUTRAL"
     },
     "MACD": {
-      "macd_line": 2.5,
-      "signal_line": -0.31,
-      "histogram": 2.8,
+      "macd_line": 0.94,
+      "signal_line": -0.06,
+      "histogram": 1.0,
       "signal": "BULLISH"
     },
     "bollinger_bands": {
-      "upper": 723.9,
-      "middle": 698.01,
-      "lower": 672.13,
-      "percent_b": 0.731,
-      "bandwidth": 0.0742,
+      "upper": 723.35,
+      "middle": 698.46,
+      "lower": 673.56,
+      "percent_b": 0.31,
+      "bandwidth": 0.0713,
       "signal": "NEUTRAL"
     },
     "stochastic": {
-      "K": 72.92,
-      "D": 79.17,
+      "K": 29.17,
+      "D": 61.11,
       "signal": "NEUTRAL"
     },
-    "ATR_14": 12.36,
-    "ATR_14_pct": 0.0174,
-    "VWAP_20d": 698.31,
+    "ATR_14": 12.94,
+    "ATR_14_pct": 0.0188,
+    "VWAP_20d": 698.71,
     "support_resistance": {
       "support_20d": 675.0,
       "resistance_20d": 723.0
     },
     "returns": {
-      "ret_1d": -0.0056,
-      "ret_5d": 0.01,
-      "ret_20d": 0.0231,
-      "ret_60d": -0.0405
+      "ret_1d": -0.0296,
+      "ret_5d": -0.0364,
+      "ret_20d": 0.0129,
+      "ret_60d": -0.0689
     },
-    "realized_vol_20d_ann": 0.2136,
+    "realized_vol_20d_ann": 0.2283,
     "fifty_two_week": {
       "high": 804.0,
       "low": 656.1,
-      "pct_from_high": -0.1169,
-      "pct_from_low": 0.0822
+      "pct_from_high": -0.143,
+      "pct_from_low": 0.0501
     },
     "OBV": {
-      "value": 6157882.0,
+      "value": 6074035.0,
       "slope_20d": "RISING"
     },
     "ADX": {
-      "value": 16.15,
-      "plus_DI": 25.57,
-      "minus_DI": 16.09,
+      "value": 15.38,
+      "plus_DI": 22.75,
+      "minus_DI": 25.35,
       "signal": "NO_TREND"
     },
     "MFI_14": {
-      "value": 59.23,
+      "value": 61.13,
       "signal": "NEUTRAL"
     }
   }
