@@ -38,6 +38,59 @@ def build_engine():
     return create_engine(f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}")
 
 
+def ensure_runtime_tables(engine):
+    """Create newer tables on existing DBs that predate schema additions."""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS bourse_orderbook (
+                    snapshot_ts  TIMESTAMPTZ PRIMARY KEY,
+                    ticker       TEXT NOT NULL DEFAULT 'ATW',
+                    bid1_orders  NUMERIC,
+                    bid2_orders  NUMERIC,
+                    bid3_orders  NUMERIC,
+                    bid4_orders  NUMERIC,
+                    bid5_orders  NUMERIC,
+                    bid1_qty     NUMERIC,
+                    bid2_qty     NUMERIC,
+                    bid3_qty     NUMERIC,
+                    bid4_qty     NUMERIC,
+                    bid5_qty     NUMERIC,
+                    bid1_price   NUMERIC,
+                    bid2_price   NUMERIC,
+                    bid3_price   NUMERIC,
+                    bid4_price   NUMERIC,
+                    bid5_price   NUMERIC,
+                    ask1_price   NUMERIC,
+                    ask2_price   NUMERIC,
+                    ask3_price   NUMERIC,
+                    ask4_price   NUMERIC,
+                    ask5_price   NUMERIC,
+                    ask1_qty     NUMERIC,
+                    ask2_qty     NUMERIC,
+                    ask3_qty     NUMERIC,
+                    ask4_qty     NUMERIC,
+                    ask5_qty     NUMERIC,
+                    ask1_orders  NUMERIC,
+                    ask2_orders  NUMERIC,
+                    ask3_orders  NUMERIC,
+                    ask4_orders  NUMERIC,
+                    ask5_orders  NUMERIC
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts
+                ON bourse_orderbook (ticker, snapshot_ts DESC)
+                """
+            )
+        )
+
+
 def upsert_df(engine, table: str, df: pd.DataFrame, conflict_cols: list[str]):
     if df.empty:
         print(f"  {table}: no rows")
@@ -84,6 +137,46 @@ def load_news(engine):
     df["scraping_date"] = pd.to_datetime(df["scraping_date"], errors="coerce", utc=True)
     df = df.dropna(subset=["url"])
     upsert_df(engine, "news", df, ["url"])
+
+
+def load_orderbook(engine):
+    paths = sorted(DATA.glob("ATW_orderbook_*.csv"))
+    if not paths:
+        print("  skip bourse_orderbook — no ATW_orderbook_*.csv files found")
+        return
+
+    frames = []
+    for path in paths:
+        df = pd.read_csv(path)
+        if "timestamp" not in df.columns:
+            print(f"  skip bourse_orderbook file — missing timestamp column: {path.name}")
+            continue
+        df = df.copy()
+        df["snapshot_ts"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+        df = df.drop(columns=["timestamp"])
+        df["ticker"] = "ATW"
+        df = df.dropna(subset=["snapshot_ts"])
+        frames.append(df)
+
+    if not frames:
+        print("  skip bourse_orderbook — no usable rows")
+        return
+
+    merged = pd.concat(frames, ignore_index=True)
+    cols = (
+        ["snapshot_ts", "ticker"]
+        + [f"bid{i}_orders" for i in range(1, 6)]
+        + [f"bid{i}_qty" for i in range(1, 6)]
+        + [f"bid{i}_price" for i in range(1, 6)]
+        + [f"ask{i}_price" for i in range(1, 6)]
+        + [f"ask{i}_qty" for i in range(1, 6)]
+        + [f"ask{i}_orders" for i in range(1, 6)]
+    )
+    for c in cols:
+        if c not in merged.columns:
+            merged[c] = None
+    merged = merged[cols]
+    upsert_df(engine, "bourse_orderbook", merged, ["snapshot_ts"])
 
 
 def load_fondamental(engine):
@@ -137,14 +230,23 @@ def load_fondamental(engine):
 
 def main():
     engine = build_engine()
+    ensure_runtime_tables(engine)
     print("Loading data into Postgres...")
     load_bourse(engine)
     load_macro(engine)
     load_news(engine)
+    load_orderbook(engine)
     load_fondamental(engine)
 
     with engine.connect() as conn:
-        for t in ("bourse_daily", "macro_morocco", "news", "fondamental_snapshot", "fondamental_yearly"):
+        for t in (
+            "bourse_daily",
+            "macro_morocco",
+            "news",
+            "bourse_orderbook",
+            "fondamental_snapshot",
+            "fondamental_yearly",
+        ):
             n = conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar()
             print(f"  {t}: {n} rows in DB")
 

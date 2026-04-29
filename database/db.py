@@ -26,6 +26,16 @@ INTRADAY_COLUMNS = [
     "shares_traded", "value_traded_mad", "num_trades", "market_cap",
 ]
 
+ORDERBOOK_COLUMNS = (
+    ["snapshot_ts", "ticker"]
+    + [f"bid{i}_orders" for i in range(1, 6)]
+    + [f"bid{i}_qty" for i in range(1, 6)]
+    + [f"bid{i}_price" for i in range(1, 6)]
+    + [f"ask{i}_price" for i in range(1, 6)]
+    + [f"ask{i}_qty" for i in range(1, 6)]
+    + [f"ask{i}_orders" for i in range(1, 6)]
+)
+
 BOURSE_RENAME = {
     "Séance": "seance",
     "Instrument": "instrument",
@@ -59,6 +69,7 @@ class AtwDatabase:
         self.engine = create_engine(
             f"postgresql+psycopg2://{user}:{pw}@{host}:{port}/{db}"
         )
+        self._ensure_runtime_tables()
 
     def close(self) -> None:
         if self.engine is not None:
@@ -77,6 +88,59 @@ class AtwDatabase:
             self.connect()
         assert self.engine is not None
         return self.engine
+
+    def _ensure_runtime_tables(self) -> None:
+        """Create newer tables on existing DBs that predate schema additions."""
+        engine = self._require()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS bourse_orderbook (
+                        snapshot_ts  TIMESTAMPTZ PRIMARY KEY,
+                        ticker       TEXT NOT NULL DEFAULT 'ATW',
+                        bid1_orders  NUMERIC,
+                        bid2_orders  NUMERIC,
+                        bid3_orders  NUMERIC,
+                        bid4_orders  NUMERIC,
+                        bid5_orders  NUMERIC,
+                        bid1_qty     NUMERIC,
+                        bid2_qty     NUMERIC,
+                        bid3_qty     NUMERIC,
+                        bid4_qty     NUMERIC,
+                        bid5_qty     NUMERIC,
+                        bid1_price   NUMERIC,
+                        bid2_price   NUMERIC,
+                        bid3_price   NUMERIC,
+                        bid4_price   NUMERIC,
+                        bid5_price   NUMERIC,
+                        ask1_price   NUMERIC,
+                        ask2_price   NUMERIC,
+                        ask3_price   NUMERIC,
+                        ask4_price   NUMERIC,
+                        ask5_price   NUMERIC,
+                        ask1_qty     NUMERIC,
+                        ask2_qty     NUMERIC,
+                        ask3_qty     NUMERIC,
+                        ask4_qty     NUMERIC,
+                        ask5_qty     NUMERIC,
+                        ask1_orders  NUMERIC,
+                        ask2_orders  NUMERIC,
+                        ask3_orders  NUMERIC,
+                        ask4_orders  NUMERIC,
+                        ask5_orders  NUMERIC
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_orderbook_ticker_ts
+                    ON bourse_orderbook (ticker, snapshot_ts DESC)
+                    """
+                )
+            )
 
     # ---------- generic upsert helper ----------
     def _upsert_ignore(self, table: str, df: pd.DataFrame, conflict_cols: list[str]) -> int:
@@ -302,6 +366,64 @@ class AtwDatabase:
             )
         return result.rowcount or 0
 
+    def save_orderbook(self, rows: Iterable[dict] | pd.DataFrame, ticker: str = "ATW") -> int:
+        """Upsert orderbook snapshots. Keyed on snapshot_ts; duplicates ignored."""
+        if rows is None:
+            return 0
+        if isinstance(rows, pd.DataFrame):
+            records = rows.where(pd.notnull(rows), None).to_dict(orient="records")
+        else:
+            records = [dict(r) for r in rows]
+        if not records:
+            return 0
+
+        clean: list[dict] = []
+        for r in records:
+            ts = r.get("snapshot_ts") or r.get("timestamp")
+            if not ts:
+                continue
+            row = {k: None for k in ORDERBOOK_COLUMNS}
+            row["snapshot_ts"] = ts
+            row["ticker"] = r.get("ticker") or ticker
+            for k in ORDERBOOK_COLUMNS:
+                if k in ("snapshot_ts", "ticker"):
+                    continue
+                row[k] = r.get(k)
+            clean.append(row)
+        if not clean:
+            return 0
+
+        engine = self._require()
+        with engine.begin() as conn:
+            before = conn.execute(text("SELECT COUNT(*) FROM bourse_orderbook")).scalar() or 0
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO bourse_orderbook (
+                        snapshot_ts, ticker,
+                        bid1_orders, bid2_orders, bid3_orders, bid4_orders, bid5_orders,
+                        bid1_qty, bid2_qty, bid3_qty, bid4_qty, bid5_qty,
+                        bid1_price, bid2_price, bid3_price, bid4_price, bid5_price,
+                        ask1_price, ask2_price, ask3_price, ask4_price, ask5_price,
+                        ask1_qty, ask2_qty, ask3_qty, ask4_qty, ask5_qty,
+                        ask1_orders, ask2_orders, ask3_orders, ask4_orders, ask5_orders
+                    ) VALUES (
+                        :snapshot_ts, :ticker,
+                        :bid1_orders, :bid2_orders, :bid3_orders, :bid4_orders, :bid5_orders,
+                        :bid1_qty, :bid2_qty, :bid3_qty, :bid4_qty, :bid5_qty,
+                        :bid1_price, :bid2_price, :bid3_price, :bid4_price, :bid5_price,
+                        :ask1_price, :ask2_price, :ask3_price, :ask4_price, :ask5_price,
+                        :ask1_qty, :ask2_qty, :ask3_qty, :ask4_qty, :ask5_qty,
+                        :ask1_orders, :ask2_orders, :ask3_orders, :ask4_orders, :ask5_orders
+                    )
+                    ON CONFLICT (snapshot_ts) DO NOTHING
+                    """
+                ),
+                clean,
+            )
+            after = conn.execute(text("SELECT COUNT(*) FROM bourse_orderbook")).scalar() or 0
+        return after - before
+
     # ---------- RETRIEVE ----------
     def get_bourse(self, start: date | None = None, end: date | None = None) -> pd.DataFrame:
         engine = self._require()
@@ -417,3 +539,20 @@ class AtwDatabase:
             engine,
             params={"s": symbol, "limit": limit},
         )
+
+    def get_orderbook(self, ticker: str = "ATW",
+                      start: datetime | None = None,
+                      end: datetime | None = None,
+                      limit: int | None = None) -> pd.DataFrame:
+        engine = self._require()
+        clauses = ["ticker = :ticker"]
+        params: dict[str, Any] = {"ticker": ticker}
+        if start:
+            clauses.append("snapshot_ts >= :start"); params["start"] = start
+        if end:
+            clauses.append("snapshot_ts <= :end"); params["end"] = end
+        q = "SELECT * FROM bourse_orderbook WHERE " + " AND ".join(clauses)
+        q += " ORDER BY snapshot_ts DESC"
+        if limit:
+            q += " LIMIT :limit"; params["limit"] = limit
+        return pd.read_sql(text(q), engine, params=params)

@@ -1,92 +1,237 @@
-# Attijariwafa Bank (ATW) Data Collection Pipeline
+# Whale Project (ATW Intelligence Suite)
 
-This project is a comprehensive data collection and processing pipeline for financial and economic data related to Attijariwafa Bank (ATW) and the Moroccan market.
+Whale is an end-to-end intelligence pipeline for **Attijariwafa Bank (ATW)**: market data, macro context, multi-source news, valuation models, and AI synthesis agents.
 
-## Features
-- **News Scraping**: Automated crawlers for major Moroccan news outlets (Boursenews, Médias24, L'Economiste, Aujourd'hui le Maroc, Google News).
-- **Macro-economic Data**: Integration with World Bank, IMF, and Yahoo Finance to track GDP, inflation, and FX rates (EUR/MAD, USD/MAD).
-- **Market Data**: Real-time and historical data collection from the Casablanca Stock Exchange (Bourse Casa).
-- **Incremental Updates**: Optimized scrapers that only fetch new data since the last successful run.
+## What this project includes
 
-## Project Structure
-- `news_crawler/`: Scrapers for various news sources.
-- `scrapers/`: Core data collection scripts for macro and financial indicators.
-- `data/`: Collected datasets in CSV format (News, Macro, Market data).
+- **Market pipeline** (`scrapers/atw_realtime_scraper.py`): intraday snapshots + official EOD consolidation from Casablanca Bourse.
+- **Macro pipeline** (`scrapers/atw_macro_collector.py`): Morocco macro + global risk factors (WB/IMF/yfinance/investing.com).
+- **Fundamentals pipeline** (`scrapers/fondamental_scraper.py`): MarketScreener periodic fundamentals (monthly cadence).
+- **News pipeline** (`news_crawler/ATW_*_news.py`): Boursenews, Medias24, L’Economiste, Aujourd’hui, MarketScreener, Google News.
+- **Valuation engine** (`models/fundamental_models.py`): DCF, DDM, Graham, Relative, Monte Carlo.
+- **AI agents**
+  - `agents/agent_news.py`: live DDGS + Groq synthesis brief (terminal output).
+  - `agents/agent_analyse.py`: holistic cited BUY/HOLD/SELL report from local data files.
+- **Database layer** (`database/db.py`): unified PostgreSQL read/write adapter for all pipelines.
+- **Automation scheduler** (`autorun/scheduler.py`): Windows-friendly cron replacement.
 
-## Setup
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Run the collectors:
-   ```bash
-   python scrapers/atw_macro_collector.py
-   ```
+## Repository map
 
-## Run valuation models from `data/`
-Fundamental valuation models are now merged in:
-- `models/fundamental_models.py`
-- The file is standalone (no dependency on `utils/financial_constants.py`)
+```text
+PFE.01/
+├── agents/                  # AI agents (news + analyse)
+├── autorun/                 # long-running scheduler
+├── database/                # AtwDatabase adapter
+├── docker/
+│   └── init/01_schema.sql   # PostgreSQL schema bootstrap
+├── models/                  # valuation models
+├── news_crawler/            # source-specific news collectors
+├── scripts/                 # DB loading/backfill helpers
+├── scrapers/                # market, macro, fundamentals collectors
+├── data/                    # generated CSV/JSON artifacts
+├── docker-compose.yml       # postgres + pgAdmin
+├── .env.example
+└── requirements.txt
+```
 
-They read inputs from the `data` folder:
-- Required daily market source: `data/ATW_bourse_casa_full.csv`
-- Required periodic fundamentals source: `data/ATW_fondamental.json`
-- Optional legacy/fallback files: `data/historical/ATW_merged.json`, `data/ATW_fondamental.csv`, `data/ATW_model_inputs.json`, `data/historical/ATW_marketscreener_v3.json`
-- Output file (always written): `data/models_result.json`
+## Prerequisites
 
-Example:
+- Python 3.10+
+- PostgreSQL (or Docker)
+- Internet access for external APIs/sources
+- For fundamentals scraper: Chrome/Chromium + Selenium stack
+- For agents: Groq API key
+
+## Installation
+
+1. Create and activate a virtual environment.
+2. Install base dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Install extra dependencies used by optional/full pipeline parts:
+
+```bash
+pip install cloudscraper feedparser lxml selenium undetected-chromedriver webdriver-manager googlenewsdecoder
+```
+
+4. Create `.env` from `.env.example` and fill secrets/credentials.
+
+## Environment variables
+
+From `.env.example`:
+
+- PostgreSQL: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT`
+- pgAdmin: `PGADMIN_DEFAULT_EMAIL`, `PGADMIN_DEFAULT_PASSWORD`
+- Agents: `GROQ_API_KEY`, optional `GROQ_MODEL`
+- Optional (if you extend agent tooling): `ANTHROPIC_API_KEY`, Google API/CSE keys
+
+## Database setup (Docker)
+
+```bash
+docker compose up -d postgres pgadmin
+```
+
+- Postgres schema is auto-created by `docker/init/01_schema.sql`.
+- pgAdmin runs on `http://localhost:5050`.
+
+## Core workflows
+
+### 1) Realtime market data
+
+```bash
+# default: one snapshot; auto-finalize after close; no raw intraday/orderbook write
+python scrapers/atw_realtime_scraper.py
+
+# explicit commands
+python scrapers/atw_realtime_scraper.py snapshot --force
+python scrapers/atw_realtime_scraper.py finalize --date 2026-04-28
+```
+
+Outputs/state:
+- `data/ATW_bourse_casa_full.csv`
+- `data/ATW_intraday.csv`
+- `data/ATW_orderbook_YYYY-MM-DD.csv`
+- `data/atw_realtime_state.json`
+- DB tables: `bourse_daily`, `bourse_intraday`, `bourse_orderbook`, `technicals_snapshot`
+
+### 2) Macro dataset
+
+```bash
+python scrapers/atw_macro_collector.py
+python scrapers/atw_macro_collector.py --full-refresh --start-date 2010-01-01
+```
+
+Output: `data/ATW_macro_morocco.csv` (+ DB upsert to `macro_morocco`).
+
+### 3) Monthly fundamentals
+
+```bash
+python scrapers/fondamental_scraper.py
+python scrapers/fondamental_scraper.py --force
+python scrapers/fondamental_scraper.py --headful --debug
+```
+
+Output: `data/ATW_fondamental.json` (+ DB upsert to `fondamental_snapshot` and `fondamental_yearly`).
+
+### 4) News collection (source scripts)
+
+```bash
+python news_crawler/ATW_boursenews_news.py
+python news_crawler/ATW_medias24_news.py
+python news_crawler/ATW_leconomiste_news.py
+python news_crawler/ATW_aujourdhui_news.py
+python news_crawler/ATW_marketscreener_news.py
+python news_crawler/ATW_googlenews_news.py
+```
+
+Common behavior:
+- canonicalization + dedup
+- noise filtering
+- signal scoring (`signal_score` 0–100 + `is_atw_core`)
+- merge/upsert to `data/ATW_news.csv`
+- DB upsert to `news` table when run as script entrypoint
+- crawler state in `data/scrapers/atw_news_state.json` (created on run)
+
+### 5) Valuation models
+
 ```bash
 python -m models.fundamental_models --model graham
 python -m models.fundamental_models --model all
 ```
 
 Behavior:
-- The loader merges available ATW files automatically before running calculations.
-- `--model graham` (or any single model) prints only that model in terminal.
-- `data/models_result.json` always contains all models: `dcf`, `ddm`, `graham`, `relative`, `monte_carlo`.
+- Loads ATW market + fundamentals from `data/` (with fallback logic).
+- Always writes **all** model outputs to `data/models_result.json`:
+  `dcf`, `ddm`, `graham`, `relative`, `monte_carlo`.
+- `--model` controls console print, not output file coverage.
 
-Minimum inputs by model:
-- `DDM`: `hist_dividend_per_share`
-- `Graham`: `hist_eps` + `hist_equity` (or `hist_book_value_per_share`)
-- `DCF`: `hist_fcf` **or** (`hist_ebitda` + `hist_capex`) — falls back to `hist_ebit` for banks
-- `Monte Carlo`: `hist_revenue` (mapped as `net_sales`) + `hist_ebitda_margin` / `hist_ebit_margin` / `hist_net_margin`
-- `Relative`: historical multiples (`pe_ratio_hist`, `ev_ebitda_hist`, `pbr_hist`, `ev_revenue_hist`, `fcf_yield_hist`) plus supporting financial fields — falls back to `ev_ebit_hist` + `hist_ebit` for banks
+### 6) AI agents
 
-### Bank-aware model behavior
-Banks (e.g., ATW) don't report EBITDA and use Net Banking Income instead of revenue. The models auto-detect and adapt:
-- **DCF** — uses `hist_ebit × (1 − tax)` when `hist_ebitda` is absent.
-- **Relative Valuation** — blends `ev_ebit_hist × hist_ebit` when `ev_ebitda_hist` / `hist_ebitda` are absent; details report `multiple_used: "EV/EBIT"`.
-- **Monte Carlo** — when only `hist_net_margin` is available, switches to bank mode: `fcf = revenue × net_margin` (net margin is already post-tax, capex is immaterial for banks). Growth baseline uses historical NBI CAGR (capped at 10%). Details include `mode: "bank"`, `base_margin_type`, `base_growth_pct`.
-- **Graham** — growth CAGR restricted to realized years (excludes forecasts), capped at 10% per Graham's own guidance; EPS uses latest reported year (not forward forecast); fair value averages Graham Number (defensive floor) and Graham Growth Formula (ceiling).
+#### News AI brief (live web search)
 
-### Historical fields scraped from MarketScreener `/valuation/`
-In addition to financials, the scraper pulls these per-year series (2020–2027 where reported):
-- `pe_ratio_hist`, `pbr_hist`, `ev_revenue_hist`, `ev_ebit_hist`, `ev_ebitda_hist`
-- `capitalization_hist` (M MAD), `hist_ebit` (M MAD)
-- Computed: `hist_fcf = hist_ocf − |hist_capex|`, `fcf_yield_hist = hist_fcf / capitalization_hist`
-- Revenue fallback for banks: scrapes "Net Banking Income" / "PNB" labels; if missing, derives `hist_revenue = capitalization_hist / ev_revenue_hist`.
+```bash
+python agents/agent_news.py
+python agents/agent_news.py --query "Only ATW earnings updates"
+python agents/agent_news.py --raw --per-query 6
+```
 
-Null-handling rules:
-- MarketScreener "—" and "0x" placeholders are parsed as null (not zero).
-- `hist_ebitda` and `ev_ebitda_hist` stay null for banks; downstream models use the EBIT fallbacks above.
+- Uses DDGS + Groq (`GROQ_API_KEY` required).
+- Terminal output only (no DB/file writes in this agent).
 
-## Minimal 2-file workflow (recommended)
-1. Update daily market file:
-   ```bash
-   python scrapers/atw_realtime_scraper.py
-   ```
-2. Update periodic fundamentals monthly:
-   ```bash
-   python scrapers/fondamental_scraper.py
-   ```
-   The scraper skips if this month is already saved. Use `--force` to re-run:
-   ```bash
-   python scrapers/fondamental_scraper.py --force
-   ```
-3. Run valuation:
-   ```bash
-   python -m models.fundamental_models --model all
-   ```
+#### Holistic analyse AI report (file-based synthesis)
+
+```bash
+python agents/agent_analyse.py
+python agents/agent_analyse.py --raw
+python agents/agent_analyse.py --lookback-days 7 --min-news-score 80
+python agents/agent_analyse.py --evidence-only
+```
+
+- Reads:
+  - `data/ATW_bourse_casa_full.csv`
+  - `data/ATW_macro_morocco.csv`
+  - `data/ATW_news.csv`
+  - `data/ATW_fondamental.json`
+  - `data/models_result.json`
+- Writes append-only prediction log: `data/prediction_history.csv` (unless `--no-history`).
+
+## Automation
+
+Run the built-in scheduler:
+
+```bash
+python autorun/scheduler.py
+python autorun/scheduler.py --status
+python autorun/scheduler.py --once NEWS
+python autorun/scheduler.py --once REALTIME
+python autorun/scheduler.py --once MONTHLY
+```
+
+Configured cadences:
+- **NEWS**: hourly (runs all `news_crawler/ATW_*_news.py`)
+- **REALTIME**: every 15 minutes during market window
+- **MONTHLY**: day 1 at 02:00 (fundamentals + macro)
+
+Logs: `autorun/autorun.log`
+
+## Utility scripts
+
+```bash
+python scripts/load_data.py
+python scripts/backfill_realtime_to_db.py
+```
+
+- `load_data.py`: pushes existing CSV/JSON in `data/` to Postgres.
+- `backfill_realtime_to_db.py`: migrates `data/atw_realtime_state.json` history into DB.
+
+## PostgreSQL schema (created automatically)
+
+- `bourse_daily`
+- `macro_morocco`
+- `news`
+- `fondamental_snapshot`
+- `fondamental_yearly`
+- `bourse_intraday`
+- `bourse_orderbook`
+- `technicals_snapshot`
+
+See full DDL in `docker/init/01_schema.sql`.
+
+## Main output files in `data/`
+
+- `ATW_bourse_casa_full.csv`
+- `ATW_intraday.csv`
+- `ATW_orderbook_YYYY-MM-DD.csv`
+- `ATW_macro_morocco.csv`
+- `ATW_fondamental.json`
+- `ATW_news.csv`
+- `models_result.json`
+- `prediction_history.csv`
+- `atw_realtime_state.json`
 
 ---
-*Created as part of PFE (Projet de Fin d'Études).*
+
+Built for PFE (Projet de Fin d'Études), focused on ATW and Moroccan market intelligence.

@@ -391,8 +391,12 @@ def _save_state(state: Dict[str, Any]) -> None:
     os.replace(tmp, STATE_FILE)
 
 
-def _persist_snapshot_to_db(snap: "Snapshot", technicals: Optional[Dict[str, Any]]) -> None:
-    """Push latest snapshot + technicals to Postgres. Non-fatal on failure."""
+def _persist_snapshot_to_db(
+    snap: "Snapshot",
+    technicals: Optional[Dict[str, Any]],
+    orderbook: Optional["OrderBook"] = None,
+) -> None:
+    """Push latest snapshot + optional orderbook + technicals to Postgres. Non-fatal on failure."""
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -404,6 +408,19 @@ def _persist_snapshot_to_db(snap: "Snapshot", technicals: Optional[Dict[str, Any
             row["ticker"] = TICKER
             n = db.save_intraday([row])
             logger.info("DB: %d intraday row(s) inserted.", n)
+            if orderbook:
+                ob_row: Dict[str, Any] = {"snapshot_ts": orderbook.timestamp, "ticker": TICKER}
+                for i in range(1, 6):
+                    b = orderbook.bids[i - 1] if len(orderbook.bids) >= i else {}
+                    a = orderbook.asks[i - 1] if len(orderbook.asks) >= i else {}
+                    ob_row[f"bid{i}_orders"] = b.get("orders")
+                    ob_row[f"bid{i}_qty"] = b.get("qty")
+                    ob_row[f"bid{i}_price"] = b.get("price")
+                    ob_row[f"ask{i}_price"] = a.get("price")
+                    ob_row[f"ask{i}_qty"] = a.get("qty")
+                    ob_row[f"ask{i}_orders"] = a.get("orders")
+                o = db.save_orderbook([ob_row], ticker=TICKER)
+                logger.info("DB: %d orderbook row(s) inserted.", o)
             if technicals:
                 t = db.save_technicals(technicals, symbol=TICKER)
                 logger.info("DB: %d technicals snapshot inserted.", t)
@@ -555,7 +572,7 @@ def cmd_snapshot(args) -> int:
 
                 _push_snapshot_history(state, cached)
                 _save_state(state)
-                _persist_snapshot_to_db(cached, technicals)
+                _persist_snapshot_to_db(cached, technicals, orderbook=None)
                 _auto_finalize_if_needed(now_casa)
                 return 0
         except ValueError:
@@ -602,7 +619,7 @@ def cmd_snapshot(args) -> int:
 
     _push_snapshot_history(state, snap)
     _save_state(state)
-    _persist_snapshot_to_db(snap, technicals)
+    _persist_snapshot_to_db(snap, technicals, orderbook=ob)
     _auto_finalize_if_needed(now_casa)
     return 0
 
