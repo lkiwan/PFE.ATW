@@ -583,18 +583,18 @@ class GrahamModel(BaseValuationModel):
         if ncav is not None:
             results["ncav_per_share"] = round(ncav, 2)
 
-        # Graham Number is a defensive floor; Graham Growth is a growth-adjusted
-        # ceiling. When both are available, average them — Graham Growth alone
-        # runs hot for fast-compounding companies like banks.
-        if graham_number and graham_number > 0 and graham_growth and graham_growth > 0:
-            primary = (graham_number + graham_growth) / 2
-            results["fair_value_method"] = "average(graham_number, graham_growth)"
-        elif graham_growth and graham_growth > 0:
-            primary = graham_growth
-            results["fair_value_method"] = "graham_growth_only"
-        elif graham_number and graham_number > 0:
+        # The "Graham" intrinsic value is the textbook Graham Number (defensive
+        # anchor: sqrt(22.5 * EPS * BVPS)). Graham Growth Formula is exposed in
+        # details for downstream consumers but is NOT averaged in here — for
+        # fast-compounding companies (banks like ATW) it inflates the result
+        # 2-3x and stops being comparable to the conventional Graham Number.
+        if graham_number and graham_number > 0:
             primary = graham_number
-            results["fair_value_method"] = "graham_number_only"
+            results["fair_value_method"] = "graham_number"
+        elif graham_growth and graham_growth > 0:
+            # Fallback only when BVPS is missing
+            primary = graham_growth
+            results["fair_value_method"] = "graham_growth_fallback"
         else:
             return ValuationResult(
                 model_name="Graham",

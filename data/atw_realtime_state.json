@@ -1,5 +1,5 @@
 {
-  "last_snapshot_ts": "2026-04-29T12:03:07+01:00",
+  "last_snapshot_ts": "2026-04-29T18:48:06+01:00",
   "last_snapshot_cotation": "2026-04-29T11:32+01:00",
   "last_snapshot_last_price": 699.9,
   "last_snapshot_open": 699.9,
@@ -17,9 +17,25 @@
     "2026-04-22",
     "2026-04-23",
     "2026-04-25",
-    "2026-04-27"
+    "2026-04-27",
+    "2026-04-29"
   ],
   "snapshot_history": [
+    {
+      "timestamp": "2026-04-29T18:48:06+01:00",
+      "cotation": "2026-04-29T11:32+01:00",
+      "market_status": "CLOSED",
+      "last_price": 699.9,
+      "open": 699.9,
+      "high": 699.9,
+      "low": 693.0,
+      "prev_close": 692.1,
+      "variation_pct": 1.13,
+      "shares_traded": 780,
+      "value_traded_mad": 545922.0,
+      "num_trades": 36,
+      "market_cap": 150577073216.1
+    },
     {
       "timestamp": "2026-04-29T12:03:07+01:00",
       "cotation": "2026-04-29T11:32+01:00",

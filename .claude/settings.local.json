@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -E \"\\\\.\\(py|json|yaml\\)$\")"
+      "Bash(grep -E \"\\\\.\\(py|json|yaml\\)$\")",
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(set PIP_CERT=)"
     ]
   }
 }

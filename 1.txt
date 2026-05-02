@@ -1,0 +1,597 @@
+Voici une explication complète de l'agent ag.py (analyse de l'action ATW à la Bourse de Casablanca) :                                          
+                        
+  ---                                                                                                                                            
+  🎯 Objectif global                                                                                                                                                                                                                                                                              
+  Cet agent analyse l'action ATW (Attijariwafa Bank) en combinant 7 sources de données différentes pour produire :                               
+  - Un verdict (ACHAT / CONSERVER / VENDRE)
+  - Une prédiction de trading (4 semaines)
+  - Une prédiction d'investissement (12 mois)
+
+  ---
+  📋 Étapes du pipeline (pas à pas)
+
+  Étape 1 — Chargement des données depuis PostgreSQL
+
+  L'agent lit 7 tables de la base :
+
+  ┌─────────────────┬──────────────────────────────┬──────────────────────────────────────────┐
+  │     Source      │            Table             │                 Contenu                  │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Marché          │ bourse_daily                 │ Prix, volume, capitalisation (252 jours) │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Carnet d'ordres │ bourse_orderbook             │ Bid/Ask sur 5 niveaux                    │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Indicateurs     │ technicals_snapshot          │ RSI, MACD, Bollinger                     │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Macro           │ macro_morocco                │ PIB, inflation, dette                    │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Fondamentaux    │ fondamental_snapshot         │ PER, ROE, dividende                      │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ Valorisations   │ models_result.json (fichier) │ DCF, DDM, Graham                         │
+  ├─────────────────┼──────────────────────────────┼──────────────────────────────────────────┤
+  │ News            │ news                         │ Articles récents avec score              │
+  └─────────────────┴──────────────────────────────┴──────────────────────────────────────────┘
+
+  Étape 2 — Validation qualité des données (DataQualityChecker)
+
+  Vérifie :
+  - Valeurs manquantes (CRITICAL)
+  - Sauts de prix > 20 % (suspect)
+  - Données obsolètes (> 3 jours)
+  - Bid ≥ Ask (carnet inversé = erreur)
+
+  Étape 3 — Calcul des indicateurs marché
+
+  ATR (Average True Range) — mesure de volatilité :
+  TR = max(High−Low, |High−Close_prev|, |Low−Close_prev|)
+  ATR(14) = moyenne(TR sur 14 derniers jours)
+
+  Volatilité 20 jours :
+  σ = écart-type(rendements_quotidiens) × 100
+
+  Performance vs moyenne mobile :
+  Prix_vs_MA20 = (Prix_actuel / MA20 − 1) × 100
+
+  Étape 4 — Features du carnet d'ordres
+
+  Order Imbalance (OI) — pression acheteur/vendeur :
+  OI = (Volume_bid − Volume_ask) / (Volume_bid + Volume_ask)
+  - OI > 0 → pression acheteuse
+  - OI < 0 → pression vendeuse
+
+  Spread bid-ask en bps :
+  Spread = (Ask₁ − Bid₁) / Bid₁ × 10 000
+
+  Z-score OI (déviation par rapport à la session) :
+  Z = (OI_actuel − moyenne_OI) / écart_type_OI
+  - |Z| > 2 → signal fort
+
+  Étape 5 — Détection du régime de marché (detect_market_regime)
+
+  Logique :
+  - Calcule rendement moyen sur 1 sem / 1 mois / 3 mois
+  - Compare prix vs MA20 et MA50
+  - Décide :
+    - BULL si rendement > +1 % et au-dessus MA20 et faible volatilité
+    - BEAR si rendement < −1 % et sous MA20 et forte volatilité
+    - SIDEWAYS sinon
+
+  Étape 6 — Prédiction Trading (4 semaines)
+
+  Cibles ATR :
+  Zone_entrée = [Prix − 0.5×ATR ; Prix + 0.5×ATR]
+  Objectif    = Prix + 1.5 × ATR
+  Stop loss   = Prix − 2.0 × ATR
+
+  Simulation Monte Carlo (1000 trajectoires sur 20 jours) :
+  S(t+1) = S(t) × exp(drift + σ × Z)
+  où Z ~ N(0,1)
+     drift = μ − 0.5 × σ²
+
+  À partir des 1000 prix finaux :
+  - Probabilité de rendement positif = % trajectoires > prix actuel
+  - VaR 95 % = −percentile(rendements, 5)
+  - Intervalle de confiance 90 % = [percentile(5), percentile(95)]
+
+  Étape 7 — Prédiction Investissement (12 mois)
+
+  Juste valeur = moyenne des 4 modèles (DCF, DDM, Graham, Relatif)
+
+  Potentiel (upside) :
+  Upside = (Juste_valeur − Prix_actuel) / Prix_actuel × 100
+
+  Seuils dynamiques (s'adaptent au régime + volatilité) :
+  Seuil_achat  = 15 % × (vol/2.5) × mult_régime × facteur_incertitude
+  Seuil_vente  = −10 % × ...
+
+  Multiplicateurs régime :
+  - BULL : achat 0.8, vente 1.2 (plus facile d'acheter)
+  - BEAR : achat 1.3, vente 0.7 (plus difficile)
+
+  Étape 8 — Bloc Evidence + LLM
+
+  L'agent compile tout dans un texte avec identifiants (ex: [MKT-PRICE], [VAL-DCF], [NEWS-1]) et l'envoie au LLM Groq (gpt-oss-120b) qui doit    
+  produire un JSON structuré avec des citations valides.
+
+  Étape 9 — Validation des citations
+
+  Vérifie que chaque [ID] cité par le LLM existe vraiment dans le bloc. Sinon, fallback déterministe.
+
+  ---
+  ✅ Avantages
+
+  1. Multi-sources — combine 7 dimensions (très complet)
+  2. Probabiliste — Monte Carlo donne une vraie distribution, pas juste un point
+  3. Adaptatif — seuils qui s'ajustent au régime de marché
+  4. Traçable — chaque conclusion est citée avec un ID
+  5. Robuste — fallback déterministe si le LLM échoue
+  6. Validation qualité — détecte automatiquement les données suspectes
+
+  ---
+  ❌ Inconvénients
+
+  1. Dépendance LLM — Groq peut être lent, indisponible ou halluciner
+  2. Monte Carlo simpliste — suppose des rendements log-normaux i.i.d. (irréaliste lors de crises)
+  3. Régime à 3 états seulement — trop simple (manque crash, recovery, etc.)
+  4. Moyenne simple des 4 modèles de valorisation — devrait être pondérée par leur précision historique
+  5. Pas de backtest intégré — on ne sait pas si les seuils donnent vraiment de bons résultats
+  6. Drift Monte Carlo basé sur 1 sem + 1 mois seulement — biais récent fort
+     (✅ horizons désormais pondérés correctement, mais l'historique reste court)
+
+  ---
+  ⚠️ Limites importantes
+
+  ┌──────────────────────────────────┬──────────────────────────────────────────────────────────────────┐
+  │              Limite              │                              Impact                              │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ np.random.seed(42) fixé          │ Mêmes résultats à chaque exécution → faux sentiment de précision │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ Volatilité historique uniquement │ Ne capte pas les chocs futurs (volatilité implicite ignorée)     │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ Pas de corrélations              │ Macro et marché traités indépendamment                           │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ Single stock only                │ ATW seulement, pas de comparaison sectorielle                    │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ Données macro Maroc partielles   │ unemployment_rate / interest_rate non scrapés (source absente)   │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ LLM température 0.2              │ Encore une part d'aléa dans la thèse narrative                   │
+  ├──────────────────────────────────┼──────────────────────────────────────────────────────────────────┤
+  │ Bug IMF connu (✅ filtré)        │ Valeurs aberrantes désormais coupées au LOAD (None au lieu de…) │
+  └──────────────────────────────────┴──────────────────────────────────────────────────────────────────┘
+
+  ---
+  📊 Résumé en une phrase
+
+  ▎ Cet agent est un analyste financier hybride : il fait les calculs déterministes (ATR, Monte Carlo, juste valeur, régime) en Python, puis
+  ▎ demande au LLM de rédiger la narration en citant les preuves — combinant rigueur quantitative et explication en langage naturel.
+
+================================================================================
+🔍 AUDIT DES CALCULS — Origine des valeurs + vérification des formules
+   (fichier source : agents/ag.py)
+================================================================================
+
+Convention : "OK" = formule conforme à la description ; "⚠️" = écart à examiner ;
+"🐛" = bug confirmé.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 1 — CHARGEMENT DES DONNÉES (sources stockées)
+────────────────────────────────────────────────────────────────────────────────
+
+[Marché] table `bourse_daily`
+  - Loader : load_market_from_db()  ag.py:440
+  - Requête : ag.py:442-453  → SELECT seance, dernier_cours, capitalisation,
+    volume, plus_haut AS plus_haut_du_jour, plus_bas AS plus_bas_du_jour
+    ORDER BY seance DESC LIMIT 252
+  - Tri remis en ordre croissant : ag.py:456 (sort_values('seance'))
+  - Champs lus : close=dernier_cours, high=plus_haut, low=plus_bas, volume,
+    capitalisation.
+  - ⚠️ "cloture_veille" (s'il existe en table) n'est PAS utilisé : le close
+    précédent est dérivé via close.shift(1) (ag.py:476).
+
+[Carnet d'ordres] table `bourse_orderbook`
+  - Loader : load_orderbook_features_from_db()  ag.py:515
+  - Requête : ag.py:517-527  → SELECT snapshot_ts, bid1..bid5_price/qty,
+    ask1..ask5_price/qty WHERE DATE = MAX(DATE) (dernière séance dispo).
+  - ⚠️ Ne lit que la DERNIÈRE journée disponible — pas une fenêtre de N jours.
+
+[Indicateurs techniques] table `technicals_snapshot`
+  - Loader : load_technicals_from_db()  ag.py:589
+  - Requête : ag.py:591-597  → SELECT payload WHERE symbol='ATW'
+    ORDER BY computed_at DESC LIMIT 1
+  - Extraction : payload['RSI']['value'], payload['MACD']['macd_line'/
+    'signal_line'], payload['bollinger_bands']['upper'/'lower'/'percent_b']
+    (ag.py:619-624).
+  - ⚠️ RSI/MACD/Bollinger NE SONT PAS recalculés ici — ils sont lus tels quels
+    depuis la table. Leur exactitude dépend du producteur du snapshot.
+
+[Macro] table `macro_morocco`
+  - Loader : load_macro_from_db()  ag.py:628
+  - Requête : ag.py:630-640  → SELECT date, gdp_growth_pct, inflation_cpi_pct,
+    public_debt_pct_gdp, usd_mad ORDER BY date DESC LIMIT 1
+  - ⚠️ unemployment_rate et interest_rate sont FORCÉS à None (ag.py:652-653) —
+    ils ne sont pas lus, même si la table les contenait.
+  - 🐛 (déjà connu / MEMORY) : IMF DataMapper Maroc renvoie parfois CPI et
+    debt/GDP gonflés ~100×. Les garde-fous MACRO_CPI_MAX=50 et
+    MACRO_DEBT_GDP_MAX=200 (ag.py:79-80) filtrent l'AFFICHAGE seulement
+    (ag.py:1145, 1151) — la valeur stockée reste corrompue.
+
+[Fondamentaux] table `fondamental_snapshot`
+  - Loader : load_fundamentals_from_db()  ag.py:672
+  - Requête : ag.py:674-682  → SELECT scrape_timestamp, payload WHERE symbol
+    ='ATW' ORDER BY scrape_timestamp DESC LIMIT 1
+  - Extraction : payload['pe_ratio_hist'], 'price_to_book', 'hist_roe',
+    'dividend_yield', 'hist_revenue', 'hist_net_income' (ag.py:707-714).
+  - Helper _latest_metric (ag.py:694-703) prend l'année la plus récente du
+    sous-dict.
+  - ⚠️ debt_to_equity et current_ratio sont câblés à None (ag.py:710-711).
+
+[Valorisations] fichier `data/models_result.json`
+  - Loader : load_valuations_from_file()  ag.py:733
+  - Lecture JSON : ag.py:748-749
+  - Champs : data['dcf'/'ddm'/'graham'/'relative']['fair_value']
+    (ag.py:752-756).
+  - ⚠️ Source FICHIER, pas DB ; fair_value_low/high = min/max des prix valides
+    (ag.py:765-766). Ce n'est PAS un IC statistique.
+
+[News] table `news`
+  - Loader : load_news_from_db()  ag.py:770
+  - Requête : ag.py:774-786  → SELECT date, title, full_content, signal_score,
+    is_atw_core WHERE date>=cutoff AND signal_score>=min_score
+    ORDER BY signal_score DESC LIMIT cap
+  - cutoff = now() - lookback_days (default 14) ; min_score default 50 ;
+    cap default 10.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 3 — INDICATEURS MARCHÉ
+────────────────────────────────────────────────────────────────────────────────
+
+▶ ATR(14)  (1.txt l.45-47)
+  - Code : ag.py:476-482
+  - Sources : close=df['dernier_cours'], high=df['plus_haut_du_jour'],
+    low=df['plus_bas_du_jour'] (issus de bourse_daily).
+  - Formule code :
+      prev_close = close.shift(1)
+      TR = max( |H-L|, |H-prev_close|, |L-prev_close| )
+      ATR(14) = mean( TR.tail(14) )
+  - ✅ OK — conforme à la définition de Wilder (moyenne simple, pas EMA).
+  - Note : la 1ère ligne a prev_close=NaN → TR partiel ; sans incidence vu
+    qu'on ne prend que les 14 dernières.
+
+▶ Volatilité 20j  (1.txt l.49-50)
+  - Code : ag.py:485-486
+  - Source : close (bourse_daily).
+  - Formule code : returns = close.pct_change() ;
+                   volatility_20d = returns.tail(20).std() * 100
+  - ✅ OK comme volatilité QUOTIDIENNE (en %). ⚠️ Ce n'est PAS annualisée.
+
+▶ Prix vs MA20 / MA50  (1.txt l.52-53)
+  - Code : ag.py:489-490, 510-511
+  - Source : close (bourse_daily).
+  - Formule code : (close.iloc[-1] / rolling(20|50).mean().iloc[-1] - 1)*100
+  - ✅ OK.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 4 — FEATURES CARNET D'ORDRES
+────────────────────────────────────────────────────────────────────────────────
+
+▶ Order Imbalance (OI)  (1.txt l.57-60)
+  - Code : ag.py:540-547
+  - Sources : bid{1..5}_qty et ask{1..5}_qty (bourse_orderbook).
+  - Formule code :
+      bid_vol_total = somme bid1_qty..bid5_qty
+      ask_vol_total = somme ask1_qty..ask5_qty
+      OI = (bid_vol_total - ask_vol_total) / (bid_vol_total + ask_vol_total + 1e-9)
+  - ⚠️ La 1.txt dit "Volume_bid - Volume_ask" sans préciser que c'est
+    AGRÉGÉ sur 5 NIVEAUX. Formule mathématiquement OK, mais à clarifier
+    dans la doc.
+
+▶ Spread bid-ask (bps)  (1.txt l.62-63)
+  - Code : ag.py:550
+  - Sources : ask1_price, bid1_price (bourse_orderbook).
+  - Formule code : (ask1_price - bid1_price) / bid1_price * 10000
+  - ✅ OK.
+
+▶ Z-score OI  (1.txt l.65-66)
+  - Code : ag.py:571
+  - Source : série OI calculée ci-dessus (intraday, même séance).
+  - Formule code : (OI.iloc[-1] - OI.mean()) / (OI.std() + 1e-9)
+  - ✅ OK — z-score intra-séance.
+
+▶ Profondeur, VWMP, retour intraday, tick-vol (non décrits dans 1.txt)
+  - depth_ratio = (bid2..5 + ask2..5) / (bid1+ask1 + 1e-9)   ag.py:556-558
+  - VWMP = Σ(mid×total_vol) / Σ(total_vol)                   ag.py:562
+  - intraday_return = (mid[-1]-mid[0])/mid[0] * 100          ag.py:565
+  - tick_vol = std(mid.pct_change()) * 100                   ag.py:568
+  - ✅ OK.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 5 — DÉTECTION DE RÉGIME (detect_market_regime)
+────────────────────────────────────────────────────────────────────────────────
+
+  - Code : ag.py:816-852
+  - Sources : market_snap.return_1w_pct, return_1m_pct, return_3m_pct,
+    volatility_20d, price_vs_ma20_pct, price_vs_ma50_pct (tous calculés
+    Étape 3 à partir de bourse_daily).
+  - Formule code :
+      avg_return = mean(returns 1w, 1m, 3m) (avec 0 si None)
+      vol_zscore = (volatility_20d - 2.5) / 1.0   ⚠️ baseline 2.5% codée en dur
+      above_ma20 = price_vs_ma20_pct > 0
+      BULL  si avg_return > 1   et above_ma20 et vol_zscore < 1.0
+      BEAR  si avg_return < -1  et NOT above_ma20 et vol_zscore > 0
+      sinon SIDEWAYS
+  - ⚠️ La 1.txt simplifie "faible volatilité" / "forte volatilité".
+    En réalité le code utilise un seuil ARBITRAIRE de 2.5% comme volatilité
+    "normale" (ag.py:835, 991). Si le marché casa-bourse a une vol-base
+    différente, la classification sera biaisée.
+  - ⚠️ MA50 calculée mais pas utilisée dans la décision (above_ma50 non lu).
+  - ⚠️ Formule de "confidence" : 0.6 + |avg_return|/10 plafonnée 0.9 — ad hoc.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 6 — PRÉDICTION TRADING (4 semaines)
+────────────────────────────────────────────────────────────────────────────────
+
+▶ Cibles ATR  (1.txt l.81-84)
+  - Code : ag.py:867-874
+  - Sources : current_price = market_snap.last_close ; atr = market_snap.atr_14d
+  - Constantes : ATR_TARGET_M=1.5, ATR_STOP_K=2.0  (ag.py:72-73)
+  - Formules :
+      entry_low  = price - 0.5 × ATR
+      entry_high = price + 0.5 × ATR
+      target     = price + 1.5 × ATR
+      stop       = price - 2.0 × ATR
+  - ✅ OK — strictement conforme à 1.txt.
+
+▶ Monte Carlo GBM (1000 trajectoires × 20 jours)  (1.txt l.86-89)
+  - Code : ag.py:887-918
+  - Sources :
+      daily_vol  ← market_snap.volatility_20d (Étape 3)
+      avg_daily_return ← market_snap.return_1w_pct, return_1m_pct
+      current_price ← market_snap.last_close
+  - Formules code (APRÈS CORRECTIONS) :
+      daily_vol = volatility_20d                        ← ag.py:922
+      daily_from_1w = (ret_1w_pct or 0) / 5             ← ag.py:925
+      daily_from_1m = (ret_1m_pct or 0) / 21            ← ag.py:926
+      avg_daily_return = mean(daily_from_1w, daily_from_1m)
+      drift = avg_daily_return/100 - 0.5*(daily_vol/100)^2
+      Z ~ N(0,1) shape (1000, 20)
+      returns_sim = exp(drift + (daily_vol/100) * Z)
+      price_paths = price * cumprod(returns_sim, axis=1)
+
+  - ✅ BUG-1 résolu : suppression du `/ sqrt(252)` (la vol était déjà
+    quotidienne — la diviser une seconde fois sous-estimait σ d'un facteur
+    ~15.9, rendant Monte Carlo, VaR, prob_positive et IC trompeurs).
+  - ✅ BUG-2 résolu : drift désormais cohérent par horizon (ret_1w/5 et
+    ret_1m/21) au lieu d'un /5 indistinct qui surestimait la composante
+    mensuelle.
+  - ⚠️ np.random.seed(42) (ag.py:932) maintenu volontairement →
+    reproductibilité tests, voir ISSUE-7.
+
+▶ Probabilité positif, VaR 95%, IC 90%  (1.txt l.91-94)
+  - Code : ag.py:910-918
+  - prob_positive = (final_prices > current_price).mean()       ✅ OK
+  - returns_dist = (final - price)/price * 100                  ✅ OK
+  - VaR 95%      = -percentile(returns_dist, 5)                 ✅ OK
+  - IC 90%       = [percentile 5, percentile 95]                ✅ OK
+  - ⚠️ Mais ces métriques héritent du bug volatilité ci-dessus → trompeuses.
+
+▶ Risk/Reward et niveau de confiance
+  - rr_ratio = |reward / risk|     ag.py:880-882   ✅ OK
+  - Confidence "HIGH" si rr_ratio>2 ET prob_positive>0.65 ;
+    "MEDIUM" si rr_ratio>1 ET prob_positive>0.55 ; sinon "LOW"  ag.py:921-926
+  - ⚠️ Seuils ad hoc, non calibrés par backtest.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 7 — PRÉDICTION INVESTISSEMENT (12 mois)
+────────────────────────────────────────────────────────────────────────────────
+
+▶ Juste valeur  (1.txt l.98)
+  - Code : ag.py:956-970
+  - Sources : val_snap.dcf_price, ddm_price, graham_price, relative_price
+    (issues de data/models_result.json).
+  - Formule : fair_value = mean(prix valides)
+              val_uncertainty = std(prix valides)
+  - ✅ OK — moyenne simple non pondérée (déjà signalé comme limite).
+
+▶ Fourchette fair_low / fair_high  (utilisé par l'IC investissement)
+  - Code : ag.py:973-974
+  - Si val_snap.fair_value_low/high>0 → utilise les bornes lues du JSON
+    (= min/max des modèles) ; sinon fallback ±10% × fair_value.
+  - ⚠️ "Fourchette" = simple ÉTALEMENT entre modèles, pas un IC statistique.
+
+▶ Upside  (1.txt l.100-101)
+  - Code : ag.py:977
+  - Formule : (fair_value - last_close) / last_close * 100
+  - ✅ OK.
+
+▶ Total return = upside + dividend_yield  (ag.py:980-983)
+  - dividend_yield ← fund_snap.dividend_yield (table fondamental_snapshot,
+    payload['dividend_yield']).
+  - ⚠️ Sommer un upside 12 mois et un yield annuel est cohérent en horizon
+    1 an, mais ne tient pas compte de la séquence de versement.
+
+▶ Seuils dynamiques  (1.txt l.103-106)
+  - Code : ag.py:987-1008
+  - Sources :
+      base_buy = RECO_BUY_THRESHOLD = 15.0      (ag.py:75)
+      base_sell = RECO_SELL_THRESHOLD = -10.0   (ag.py:76)
+      vol_multiplier = volatility_20d / 2.5     (baseline 2.5% en dur)
+      regime_mult_buy/sell selon BULL/BEAR/SIDEWAYS (ag.py:994-1002)
+      uncertainty_factor = 1 + val_uncertainty/20 si val_uncertainty>0
+  - Formules :
+      dynamic_buy  = 15  × vol_mult × regime_mult_buy  × uncertainty_factor
+      dynamic_sell = -10 × vol_mult × regime_mult_sell × uncertainty_factor
+  - ✅ OK — strictement conforme à 1.txt l.104.
+  - ⚠️ Tous les multiplicateurs (2.5, 0.8/1.2, 1.3/0.7, /20) sont des
+    constantes empiriques non calibrées.
+
+▶ Multiplicateurs de régime  (1.txt l.108-109)
+  - Code : ag.py:994-1002  ✅ valeurs identiques à la doc.
+
+▶ Recommandation  (ag.py:1011-1019)
+  - upside ≥ dynamic_buy   → ACHAT  (HIGH si upside > 1.5×seuil)
+  - upside ≤ dynamic_sell  → VENDRE (HIGH si upside < 1.5×seuil)
+  - sinon CONSERVER (MEDIUM si |upside|<5, sinon LOW)
+  - ⚠️ Pas mentionné dans 1.txt : règle de "conviction" sur dim de l'écart.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 8 — BLOC EVIDENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  - Code : compose_evidence_block_enhanced  ag.py:1041-1247
+  - Toutes les valeurs IDX [MKT-*], [OB-*], [TECH-*], [MACRO-*], [FUND-*],
+    [VAL-*], [PRED-*], [REGIME-*] proviennent des dataclasses chargées
+    Étape 1 et des calculs Étapes 3-7. Pas de calcul nouveau ici (sauf
+    [VAL-UPSIDE] = ((fair_low+fair_high)/2 - last_close)/last_close*100,
+    ag.py:1196-1198 ✅ OK).
+
+  - ⚠️ [NEWS-SENTIMENT] : sentiment = "positif" si avg_score>60, "négatif"
+    si <40, "neutre" sinon (ag.py:1216). avg_score est la MOYENNE des
+    signal_score lus dans la table news — pas une vraie analyse de sentiment.
+
+────────────────────────────────────────────────────────────────────────────────
+ÉTAPE 9 — VALIDATION DES CITATIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  - extract_valid_refs (ag.py:1254) : regex r'\[([A-Z]+-[A-Z0-9-]+)\]' sur le
+    bloc d'evidence.
+  - validate_citations (ag.py:1261) : vérifie findings, verdict_reasoning,
+    trading.thesis, investment.thesis. ✅ OK.
+  - Fallback déterministe : build_fallback_analysis  ag.py:1403-1535.
+
+────────────────────────────────────────────────────────────────────────────────
+🚨 RÉCAPITULATIF DES ANOMALIES — STATUT
+────────────────────────────────────────────────────────────────────────────────
+
+✅ BUG-1 (CORRIGÉ) — ag.py:920-922
+   `daily_vol = volatility_20d / sqrt(252)` était faux : volatility_20d est
+   DÉJÀ quotidienne. Diviser encore par √252 sous-estimait σ d'un facteur
+   ~15.9.
+   FIX appliqué : `daily_vol = market_snap.volatility_20d`.
+
+✅ BUG-2 (CORRIGÉ) — ag.py:924-927
+   `avg_daily_return = mean(ret_1w, ret_1m) / 5` mélangeait un retour 5j et
+   un retour 21j en divisant les deux par 5. Drift sur-évalué ~×4 sur la
+   composante mensuelle.
+   FIX appliqué :
+       daily_from_1w = (return_1w_pct or 0) / 5
+       daily_from_1m = (return_1m_pct or 0) / 21
+       avg_daily_return = mean(daily_from_1w, daily_from_1m)
+
+✅ ISSUE-3 (CORRIGÉ) — ag.py:77, 867, 1024
+   Baseline 2.5% extraite en constante module-level
+   `TYPICAL_DAILY_VOL_PCT = 2.5`. Plus de magic number dupliqué entre
+   detect_market_regime et compute_investment_prediction_enhanced.
+   ⚠️ Reste : la valeur 2.5 elle-même n'est toujours pas calibrée
+   empiriquement sur Casa-Bourse — à backtester séparément.
+
+✅ ISSUE-4 (CORRIGÉ) — ag.py:875, 879
+   MA50 désormais utilisée dans la décision : BULL exige
+   `above_ma20 AND above_ma50`, BEAR exige les deux en dessous. La
+   confiance de base passe à 0.65 quand les deux MA sont alignées (vs 0.6).
+   Effet : moins de faux positifs BULL/BEAR sur cassures isolées de MA20.
+
+✅ ISSUE-5 (PARTIELLEMENT CORRIGÉ) — ag.py:725-738
+   `debt_to_equity` est maintenant dérivé de
+   `payload['hist_debt'][last_year] / payload['hist_equity'][last_year]`
+   (dernier exercice commun aux deux séries).
+   Honestement non disponibles (pas dans schéma DB ni scraper) →
+   commentaires explicatifs ajoutés :
+     - unemployment_rate, interest_rate (ag.py:660-662)
+     - current_ratio (ag.py:743)
+
+✅ ISSUE-6 (CORRIGÉ) — ag.py:651-672
+   Garde-fous CPI/Debt appliqués au LOAD via helper `_within(value, upper)` :
+   si > MAX → None, sinon valeur. Les valeurs corrompues n'arrivent plus
+   dans `MacroSnapshot`, donc plus aucun consommateur (calcul ou affichage)
+   ne peut les voir.
+
+⚠️ ISSUE-7 (NON TRAITÉ) — ag.py:932 (ex-900)
+   np.random.seed(42) maintenu volontairement (reproductibilité tests +
+   prediction_history). Le retirer ferait diverger les anciennes prédictions
+   stockées des nouvelles.
+   À reconsidérer si on construit un vrai backtest stochastique.
+
+────────────────────────────────────────────────────────────────────────────────
+🆕 BUGS DÉCOUVERTS APRÈS LE PREMIER PASS — CORRIGÉS
+────────────────────────────────────────────────────────────────────────────────
+
+✅ BUG-VAL-KEY (CORRIGÉ — IMPACT MAJEUR) — ag.py:783-810
+   `load_valuations_from_file` lisait `data['dcf'].get('fair_value')` mais
+   le JSON produit par `models/fundamental_models.py` utilise la clé
+   `intrinsic_value`. Conséquence silencieuse : tous les prix valuations
+   (DCF, DDM, Graham, Relative) remontaient à `None`, donc :
+     - valid_prices = [] →  fair_value = market_snap.last_close (fallback)
+     - upside = 0% systématiquement
+     - dynamic_buy/sell jamais déclenchés
+     - recommandation toujours CONSERVER (par défaut)
+   FIX appliqué : helper local `_price(block_name)` qui lit
+   `intrinsic_value`. Plus exposition de `graham_growth_price` séparé.
+
+✅ BUG-GRAHAM (CORRIGÉ) — models/fundamental_models.py:586-602
+   `GrahamModel` retournait `intrinsic_value = (graham_number +
+   graham_growth) / 2`. Pour ATW (banque à forte croissance, growth_rate
+   capé à 10%) :
+     - Graham Number  =  578.78 MAD  (formule manuel : √(22.5×EPS×BVPS))
+     - Graham Growth  = 1582.91 MAD  (formule croissance, gonflée pour
+       fast-compounders)
+     - moyenne reportée = 1080.84 MAD ← surévaluation +87% vs Graham pur
+   La référence externe (image) calcule Graham Number = 550.51 avec un
+   EPS forward (47.03) et BVPS (286.4). Notre code utilise EPS réalisé
+   (~52) et BVPS dérivé equity/shares (~289), d'où l'écart résiduel ~5%.
+   FIX appliqué : `intrinsic_value = graham_number` (ancrage défensif
+   conforme au manuel). `graham_growth_formula` reste exposé dans
+   `details` et exposé séparément en agent comme `[VAL-GRAHAM-GROWTH]`.
+
+────────────────────────────────────────────────────────────────────────────────
+📊 EFFET CUMULÉ DES CORRECTIONS (avant/après pour ATW à ~696 MAD)
+────────────────────────────────────────────────────────────────────────────────
+
+┌─────────────────────────────┬────────────────────┬────────────────────────┐
+│           Métrique          │       Avant        │         Après          │
+├─────────────────────────────┼────────────────────┼────────────────────────┤
+│ Volatilité Monte Carlo σ    │ ~0.16 %/jour       │ ~2.50 %/jour           │
+│ Drift Monte Carlo           │ surestimé ×4       │ horizon-correct        │
+│ Prob_positive               │ artificiellement   │ proche de la réalité   │
+│                             │ élevée             │                        │
+│ VaR 95 %                    │ sous-estimée       │ réaliste               │
+│ IC 90 %                     │ trop étroit        │ élargi                 │
+│ Régime BULL/BEAR            │ déclenché sur MA20 │ exige MA20 + MA50      │
+│                             │ seul               │                        │
+│ debt_to_equity              │ None               │ calculé sur derniers   │
+│                             │                    │ debt/equity            │
+│ Macro CPI/Debt corrompus    │ filtrés affichage  │ filtrés au LOAD        │
+│ DCF / DDM / Graham / Rel    │ tous None          │ tous chargés           │
+│ Fair value (juste valeur)   │ = last_close       │ ≈ 635 MAD (mean 4 mod) │
+│ Upside affiché              │ ~0 %               │ ≈ −8.7 %               │
+│ Graham reporté              │ 1080.84 (moyenne   │ 578.78 (Graham Number  │
+│                             │ hybride)           │ pur, conforme manuel)  │
+│ [VAL-GRAHAM-GROWTH]         │ caché (mélangé)    │ ligne dédiée           │
+└─────────────────────────────┴────────────────────┴────────────────────────┘
+
+────────────────────────────────────────────────────────────────────────────────
+🔭 PISTES SUIVANTES (non traitées)
+────────────────────────────────────────────────────────────────────────────────
+
+1. Aligner inputs Graham : pourquoi BVPS code = ~289 vs ref = 286.4 ?
+   → vérifier numerator (equity Groupe vs Part du Groupe) et denominator
+     (NUM_SHARES dans models/fundamental_models.py).
+
+2. Audit DCF : WACC=8.68 %, terminal_growth=2.5 %, FCF projetés à 5 ans
+   → vérifier les hypothèses (cohérence avec coût des fonds propres,
+     croissance long-terme Maroc).
+
+3. Audit DDM : intrinsic_value 277 MAD donne upside −61 % — vérifier
+   stage1_growth_pct=2.5 % (très bas pour ATW historiquement), terminal
+   growth, cost_of_equity.
+
+4. Calibrer TYPICAL_DAILY_VOL_PCT (2.5 %) sur historique long Casa-Bourse.
+
+5. Pondérer les modèles de juste valeur par leur précision historique
+   (DCF/DDM/Graham/Rel ne devraient pas peser pareil pour une banque).
+
+6. Backtest stochastique : retirer np.random.seed(42), refaire 100×
+   l'analyse, mesurer la dispersion des recommandations.
+
+7. Pour [NEWS-SENTIMENT] : remplacer la moyenne des signal_score par un
+   vrai scoring sentiment (le signal_score actuel mesure la pertinence,
+   pas la polarité).

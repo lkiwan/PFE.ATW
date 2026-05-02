@@ -1,16 +1,16 @@
 {
   "dcf": {
     "model_name": "DCF",
-    "intrinsic_value": 1005.49,
-    "intrinsic_value_low": 821.85,
-    "intrinsic_value_high": 1305.8,
-    "upside_pct": 40.6,
+    "intrinsic_value": 1007.71,
+    "intrinsic_value_low": 823.32,
+    "intrinsic_value_high": 1309.61,
+    "upside_pct": 44.2,
     "confidence": 80,
     "methodology": "Two-stage DCF with Gordon Growth terminal value",
     "details": {
-      "wacc": 8.68,
+      "wacc": 8.67,
       "terminal_growth": 2.5,
-      "enterprise_value_m": 216322.0,
+      "enterprise_value_m": 216800.0,
       "net_debt_m": 0,
       "fcf_projections": [
         12920.0,
@@ -26,7 +26,7 @@
     "intrinsic_value": 277.37,
     "intrinsic_value_low": 242.04,
     "intrinsic_value_high": 324.79,
-    "upside_pct": -61.2,
+    "upside_pct": -60.3,
     "confidence": 45,
     "methodology": "Three-stage DDM (explicit + transition + terminal)",
     "details": {
@@ -42,10 +42,10 @@
   },
   "graham": {
     "model_name": "Graham",
-    "intrinsic_value": 1080.84,
+    "intrinsic_value": 578.78,
     "intrinsic_value_low": 578.78,
     "intrinsic_value_high": 1582.91,
-    "upside_pct": 51.2,
+    "upside_pct": -17.2,
     "confidence": 70,
     "methodology": "Graham Number + Growth Formula (The Intelligent Investor)",
     "details": {
@@ -53,7 +53,7 @@
       "graham_growth_formula": 1582.91,
       "assumed_growth_rate": 10.0,
       "bond_yield_used": 3.5,
-      "fair_value_method": "average(graham_number, graham_growth)"
+      "fair_value_method": "graham_number"
     }
   },
   "relative": {
@@ -61,7 +61,7 @@
     "intrinsic_value": 677.28,
     "intrinsic_value_low": 663.45,
     "intrinsic_value_high": 696.63,
-    "upside_pct": -5.3,
+    "upside_pct": -3.1,
     "confidence": 50,
     "methodology": "Weighted composite of historical and sector multiples",
     "details": {
@@ -87,7 +87,7 @@
     "intrinsic_value": 1100.99,
     "intrinsic_value_low": 800.0,
     "intrinsic_value_high": 1545.2,
-    "upside_pct": 54.0,
+    "upside_pct": 57.5,
     "confidence": 49.0,
     "methodology": "Monte Carlo DCF (10,000 simulations)",
     "details": {
@@ -97,7 +97,7 @@
       "p25": 926.79,
       "p75": 1314.96,
       "p90_bull": 1545.2,
-      "prob_above_current_price_pct": 96.3,
+      "prob_above_current_price_pct": 96.9,
       "valid_simulations": 10000,
       "base_revenue_m": 30420.0,
       "base_margin_pct": 30.1,
